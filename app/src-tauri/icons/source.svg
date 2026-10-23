@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024">
+  <!-- Holdr app icon: lowercase "h" with the accent dot of the wordmark "holdr." -->
+  <rect width="1024" height="1024" rx="228" fill="#2747d6"/>
+  <path fill="#ffffff" d="M290 210h120v290c34-52 92-86 164-86 116 0 186 78 186 206v190H640V630c0-70-34-110-96-110-78 0-134 56-134 150v140H290Z"/>
+  <circle cx="820" cy="752" r="58" fill="#a8b8ff"/>
+</svg>

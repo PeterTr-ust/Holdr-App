@@ -1,0 +1,71 @@
+#!/bin/sh
+#
+# Blocks commits that contain secrets, personal data or build artifacts,
+# and commits made with a non-anonymous author or committer e-mail.
+# Activated automatically by `npm install` in app/ (see "prepare" script),
+# or manually with: git config core.hooksPath .githooks
+#
+# In case of a false positive, review carefully and bypass once with:
+#   git commit --no-verify
+
+status=0
+
+# 0. Author and committer must be anonymous (no private e-mail address in git history).
+is_anonymous() {
+  printf '%s' "$1" | grep -qiE '(noreply|no-reply)[^@]*@|@users\.noreply\.github\.com$|\.invalid$'
+}
+for role in AUTHOR COMMITTER; do
+  email=$(git var "GIT_${role}_IDENT" | sed -E 's/.*<([^>]*)>.*/\1/')
+  if ! is_anonymous "$email"; then
+    echo "pre-commit: the commit $role e-mail \"$email\" is not anonymous." >&2
+    echo "  Use your GitHub noreply address, e.g.:" >&2
+    echo "  git config user.email \"<id>+<username>@users.noreply.github.com\"" >&2
+    status=1
+  fi
+done
+
+staged=$(git diff --cached --name-only --diff-filter=ACMR)
+[ -z "$staged" ] && exit $status
+
+# 1. File names that must never be committed.
+blocked_files=$(printf '%s\n' "$staged" | grep -iE \
+  '(^|/)\.env($|\.)|\.(pem|key|p8|p12|pfx|cer|crt|keystore|jks|mobileprovision|provisionprofile)$|\.(db|db-shm|db-wal|sqlite|sqlite3|bak)$|holdr-backup[^/]*\.json$|\.(exe|msi|dmg|appimage|deb)$|(^|/)downloads/|sftp-config\.json$|site\.config\.local\.json$|\.ftpconfig$' \
+  | grep -v '\.env\.example$')
+if [ -n "$blocked_files" ]; then
+  echo "pre-commit: these files look like secrets, personal data or installers:" >&2
+  printf '  %s\n' $blocked_files >&2
+  status=1
+fi
+
+# 2. Added lines that look like credentials (lockfiles and this hook are skipped).
+content_files=$(printf '%s\n' "$staged" | grep -vE '(package-lock\.json|Cargo\.lock|^\.githooks/)')
+if [ -n "$content_files" ]; then
+  # shellcheck disable=SC2086
+  findings=$(git diff --cached -U0 --diff-filter=ACMR -- $content_files \
+    | grep -E '^\+' | grep -v '^+++' \
+    | grep -nE 'BEGIN [A-Z ]*PRIVATE KEY|ghp_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|AKIA[0-9A-Z]{16}|sk-[A-Za-z0-9_-]{20,}|xox[abprs]-[A-Za-z0-9-]{10,}|(password|passwd|pwd|secret|token|api[_-]?key)["'"'"']?[[:space:]]*[:=][[:space:]]*["'"'"'][^"'"'"']{6,}' -i)
+  if [ -n "$findings" ]; then
+    echo "pre-commit: added lines look like passwords, tokens or keys:" >&2
+    printf '%s\n' "$findings" | cut -c1-160 >&2
+    status=1
+  fi
+
+  # Personal e-mail addresses must not be committed; noreply and example addresses are fine.
+  # shellcheck disable=SC2086
+  emails=$(git diff --cached -U0 --diff-filter=ACMR -- $content_files \
+    | grep -E '^\+' | grep -v '^+++' \
+    | grep -oE '[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}' \
+    | grep -viE '(noreply|no-reply)[^@]*@|@users\.noreply\.github\.com$|@example\.(com|org|net)$|\.invalid$|^git@github\.com$|\.(png|jpe?g|gif|svg|webp|ico|icns)$' \
+    | sort -u)
+  if [ -n "$emails" ]; then
+    echo "pre-commit: added lines contain e-mail addresses (personal data):" >&2
+    printf '  %s\n' $emails >&2
+    status=1
+  fi
+fi
+
+if [ "$status" -ne 0 ]; then
+  echo "" >&2
+  echo "Commit aborted. Remove these from the commit (git restore --staged <file>)." >&2
+fi
+exit $status

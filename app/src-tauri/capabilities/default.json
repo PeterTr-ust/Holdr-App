@@ -1,0 +1,26 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Permissions of the main window: local database, market data requests and backup files picked by the user.",
+  "windows": ["main"],
+  "permissions": [
+    "core:default",
+    "sql:default",
+    "sql:allow-execute",
+    "dialog:allow-save",
+    "dialog:allow-open",
+    "fs:allow-read-text-file",
+    "fs:allow-write-text-file",
+    {
+      "identifier": "http:default",
+      "allow": [
+        {
+          "url": "https://query1.finance.yahoo.com/*"
+        },
+        {
+          "url": "https://query2.finance.yahoo.com/*"
+        }
+      ]
+    }
+  ]
+}

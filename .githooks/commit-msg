@@ -1,0 +1,9 @@
+#!/bin/sh
+#
+# Keeps commit messages free of attribution trailers and session links, which
+# could identify people or tools.
+
+if grep -qiE '^(co-authored-by|signed-off-by|reviewed-by):|/code/session_' "$1"; then
+  echo "commit-msg: remove attribution trailers (Co-authored-by, Signed-off-by, ...) and session links from the message." >&2
+  exit 1
+fi
