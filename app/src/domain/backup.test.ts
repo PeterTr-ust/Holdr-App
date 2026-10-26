@@ -37,6 +37,18 @@ const data: BackupData = {
       note: null,
       createdAt: "",
     },
+    {
+      id: 9,
+      instrumentId: 3,
+      type: "SPLIT",
+      date: "2026-06-01",
+      ratioTo: 2,
+      ratioFrom: 1,
+      fee: 0,
+      tax: 0,
+      note: null,
+      createdAt: "",
+    },
   ],
   watchlist: [
     {
@@ -50,6 +62,7 @@ const data: BackupData = {
       addedPrice: 210.5,
     },
   ],
+  dismissedSuggestions: ["SAP.DE|DIVIDEND|2026-05-15"],
   settings: { language: "de", displayCurrency: "EUR" },
 };
 
@@ -71,6 +84,7 @@ describe("backup round trip", () => {
     expect(parsed.instruments).toEqual(data.instruments);
     expect(parsed.transactions).toEqual(data.transactions);
     expect(parsed.watchlist).toEqual(data.watchlist);
+    expect(parsed.dismissedSuggestions).toEqual(data.dismissedSuggestions);
     expect(parsed.settings).toEqual(data.settings);
     expect(parsed.exportedAt).toBe("2026-10-22T12:00:00.000Z");
   });
@@ -81,6 +95,12 @@ describe("backup round trip", () => {
 });
 
 describe("parseBackup compatibility", () => {
+  it("accepts version 3 files, which had no dismissed suggestions", () => {
+    const legacy: Record<string, unknown> = { ...createBackup(data, "0.1.0"), version: 3 };
+    delete legacy.dismissedSuggestions;
+    expect(parseBackup(JSON.stringify(legacy)).dismissedSuggestions).toEqual([]);
+  });
+
   it("accepts version 2 files, which had no separate taxes", () => {
     const legacy = createBackup(data, "0.1.0") as unknown as Record<string, unknown>;
     const transactions = (legacy.transactions as Record<string, unknown>[]).map((t) => {
@@ -97,7 +117,7 @@ describe("parseBackup compatibility", () => {
     delete legacy.watchlist;
     const parsed = parseBackup(JSON.stringify(legacy));
     expect(parsed.watchlist).toEqual([]);
-    expect(parsed.transactions).toHaveLength(2);
+    expect(parsed.transactions).toHaveLength(3);
   });
 });
 
@@ -146,9 +166,18 @@ describe("parseBackup rejects", () => {
       ...valid,
       transactions: [
         ...data.transactions,
-        { ...data.transactions[0], id: 9, type: "SELL", date: "2026-06-01", quantity: 11 },
+        // 10 shares, doubled by the split.
+        { ...data.transactions[0], id: 10, type: "SELL", date: "2026-06-02", quantity: 21 },
       ],
     };
     expect(codeOf(serialize(oversold))).toBe("inconsistent");
+  });
+
+  it("splits with a missing ratio or with fees", () => {
+    const split = data.transactions[2]!;
+    const noRatio = { ...valid, transactions: [data.transactions[0], { ...split, ratioTo: 0 }] };
+    const withFee = { ...valid, transactions: [data.transactions[0], { ...split, fee: 1 }] };
+    expect(codeOf(serialize(noRatio))).toBe("invalid");
+    expect(codeOf(serialize(withFee))).toBe("invalid");
   });
 });

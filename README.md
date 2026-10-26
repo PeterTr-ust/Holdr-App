@@ -26,8 +26,11 @@
 ## Features
 
 - **See your wealth at a glance** – total value, result since purchase, today's change and a value chart over 1 month to 5 years.
-- **Buys, sells and dividends** – as many transactions per stock as you like, with fees and taxes kept apart, including fractional shares.
+- **Buys, sells, dividends and splits** – as many transactions per stock as you like, with fees and taxes kept apart, including fractional shares.
+- **Dividends and splits spotted for you** – Holdr finds payouts and splits of your holdings that you have not recorded yet; you check them and add them with one click.
 - **Honest statistics** – realized gains and losses (FIFO), dividends, fees and taxes, in total, per year and per position.
+- **How diversified am I?** – your portfolio by sector and by country; ETFs are split by their sector weights.
+- **Upcoming dates** – next ex-dividend date, payment date and earnings report for each position.
 - **Watchlist** – follow stocks you don't own yet, with the change since you added them.
 - **Stocks and ETFs worldwide** – search by name, ticker or ISIN, e.g. on XETRA, Vienna, NASDAQ or NYSE.
 - **Euro or US dollar** – other currencies are converted automatically.
@@ -83,9 +86,11 @@ Holdr is built to keep your financial data to yourself.
 
 - Your positions, transactions, watchlist and settings are stored **only on your computer**, in one
   SQLite file. There is no account, no server and no telemetry.
-- To get prices, Holdr requests data from **Yahoo Finance**. It sends only your search terms and the
-  ticker symbols of your positions, watchlist and required exchange rates – never share counts,
-  purchase prices or amounts. As with any internet request, Yahoo sees your IP address.
+- To get prices, dividends, splits, sectors and dates, Holdr requests data from **Yahoo Finance**. It
+  sends only your search terms and the ticker symbols of your positions, watchlist and required
+  exchange rates – never share counts, purchase prices or amounts. As with any internet request, Yahoo
+  sees your IP address. For sectors and dates, Yahoo requires a session cookie; Holdr keeps it in memory
+  only and discards it when you quit.
 - On Windows, Holdr uses Microsoft's WebView2 runtime for display; whether it sends diagnostic data to
   Microsoft depends on your Windows settings.
 

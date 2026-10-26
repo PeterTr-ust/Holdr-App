@@ -234,6 +234,12 @@ textarea {
   padding: 10px 14px;
   font-size: 0.9rem;
 }
+.banner-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 12px;
+  align-items: baseline;
+}
 
 /* ---------- Hero ---------- */
 
@@ -474,6 +480,24 @@ details.closed[open] summary::before {
   font: 500 1.05rem var(--font-data);
   font-variant-numeric: tabular-nums;
 }
+.fact-hint {
+  font-size: 0.76rem;
+  color: var(--mute);
+}
+.section-intro {
+  margin: 0 0 12px;
+  max-width: 75ch;
+  font-size: 0.9rem;
+}
+.suggestion {
+  display: grid;
+  grid-template-columns: 110px 1fr auto;
+  gap: 12px;
+  align-items: center;
+  padding: 10px 8px;
+  border-top: 1px solid var(--line);
+  font-size: 0.9rem;
+}
 .toolbar {
   display: flex;
   flex-wrap: wrap;
@@ -520,6 +544,9 @@ details.closed[open] summary::before {
 }
 .chip.DIVIDEND {
   color: var(--pos);
+}
+.chip.SPLIT {
+  color: var(--ink);
 }
 .chip.owned {
   margin-left: 8px;
@@ -599,6 +626,34 @@ table.data td:first-child {
   font-family: var(--font-display);
   font-weight: 600;
 }
+.allocation {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 22px 40px;
+}
+.allocation-title {
+  margin: 0 0 6px;
+  font: 500 0.72rem var(--font-data);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--mute);
+}
+.allocation-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.allocation-list li {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 0 12px;
+  padding: 8px 0 6px;
+  border-top: 1px solid var(--line);
+}
+.allocation-list .weight {
+  grid-column: 1 / -1;
+}
+
 .note {
   color: var(--mute);
   font-size: 0.85rem;
@@ -645,6 +700,7 @@ dialog.modal::backdrop {
   display: grid;
   grid-template-columns: 1fr 1fr;
   gap: 14px;
+  align-items: start;
 }
 .field {
   display: grid;

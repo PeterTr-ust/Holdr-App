@@ -1,30 +1,31 @@
 /**
- * Form for entering or editing a buy, sell or dividend transaction.
+ * Form for entering or editing a buy, sell, dividend or split transaction.
  */
 import { useId, useState, type FormEvent } from "react";
 import { OversellError } from "../domain/portfolio";
-import type { CurrencyCode, Transaction, TransactionType } from "../domain/types";
+import type { CurrencyCode, TransactionType } from "../domain/types";
 import { useI18n, type MessageKey } from "../i18n";
 import type { TransactionDraft } from "../state/AppState";
 import { formatDecimalInput, parseDecimal, todayIso } from "../util/input";
 
+/** Types offered by default; splits are entered separately. */
 const TYPES: TransactionType[] = ["BUY", "SELL", "DIVIDEND"];
 
 interface TransactionFormProps {
   currency: CurrencyCode;
-  /** Existing transaction when editing. */
-  initial?: Transaction;
+  /** Existing transaction when editing, or prefilled values, e.g. from a suggestion. */
+  initial?: TransactionDraft;
   initialType?: TransactionType;
   /** Suggested price per share, e.g. the current quote. */
   suggestedPrice?: number | null;
-  /** Restricts the selectable types, e.g. only BUY for a new position. */
+  /** Restricts the selectable types, e.g. only BUY for a new position. Splits default to SPLIT only. */
   types?: TransactionType[];
   submitLabel: string;
   onSubmit(draft: TransactionDraft): Promise<void>;
   onCancel(): void;
 }
 
-type Field = "date" | "quantity" | "price" | "amount" | "fee" | "tax";
+type Field = "date" | "quantity" | "price" | "amount" | "fee" | "tax" | "ratioTo" | "ratioFrom";
 type Errors = Partial<Record<Field, MessageKey>>;
 
 export function TransactionForm({
@@ -32,7 +33,7 @@ export function TransactionForm({
   initial,
   initialType = "BUY",
   suggestedPrice,
-  types = TYPES,
+  types = (initial?.type ?? initialType) === "SPLIT" ? ["SPLIT"] : TYPES,
   submitLabel,
   onSubmit,
   onCancel,
@@ -44,12 +45,12 @@ export function TransactionForm({
 
   const [type, setType] = useState<TransactionType>(initial?.type ?? initialType);
   const [date, setDate] = useState(initial?.date ?? todayIso());
-  const [quantity, setQuantity] = useState(
-    toInput(initial && initial.type !== "DIVIDEND" ? initial.quantity : undefined),
-  );
-  const [price, setPrice] = useState(
-    toInput(initial && initial.type !== "DIVIDEND" ? initial.price : suggestedPrice),
-  );
+  const trade = initial?.type === "BUY" || initial?.type === "SELL" ? initial : undefined;
+  const split = initial?.type === "SPLIT" ? initial : undefined;
+  const [quantity, setQuantity] = useState(toInput(trade?.quantity));
+  const [price, setPrice] = useState(toInput(trade ? trade.price : suggestedPrice));
+  const [ratioTo, setRatioTo] = useState(toInput(split?.ratioTo));
+  const [ratioFrom, setRatioFrom] = useState(toInput(split?.ratioFrom ?? 1));
   const [amount, setAmount] = useState(
     toInput(initial?.type === "DIVIDEND" ? initial.amount : undefined),
   );
@@ -60,14 +61,17 @@ export function TransactionForm({
   const [formError, setFormError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
-  const isTrade = type !== "DIVIDEND";
-  // Purchases have no taxes; their costs are fees.
-  const hasTax = type !== "BUY";
+  const isTrade = type === "BUY" || type === "SELL";
+  const isSplit = type === "SPLIT";
+  // Purchases have no taxes, their costs are fees; splits have neither.
+  const hasTax = type === "SELL" || type === "DIVIDEND";
   const values = {
     quantity: parseDecimal(quantity),
     price: parseDecimal(price),
     amount: parseDecimal(amount),
-    fee: parseDecimal(fee) ?? 0,
+    ratioTo: parseDecimal(ratioTo),
+    ratioFrom: parseDecimal(ratioFrom),
+    fee: isSplit ? 0 : (parseDecimal(fee) ?? 0),
     tax: hasTax ? (parseDecimal(tax) ?? 0) : 0,
   };
   // What leaves the account for a purchase, or arrives for a sale or dividend.
@@ -83,14 +87,21 @@ export function TransactionForm({
     const result: Errors = {};
     if (!date) result.date = "tx.errorRequired";
     else if (date > todayIso()) result.date = "tx.errorFuture";
+    const positive = (field: Field, input: string, value: number | null) => {
+      if (!(value! > 0)) result[field] = input ? "tx.errorPositive" : "tx.errorRequired";
+    };
     if (isTrade) {
-      if (!(values.quantity! > 0))
-        result.quantity = quantity ? "tx.errorPositive" : "tx.errorRequired";
-      if (!(values.price! > 0)) result.price = price ? "tx.errorPositive" : "tx.errorRequired";
-    } else if (!(values.amount! > 0)) {
-      result.amount = amount ? "tx.errorPositive" : "tx.errorRequired";
+      positive("quantity", quantity, values.quantity);
+      positive("price", price, values.price);
+    } else if (isSplit) {
+      positive("ratioTo", ratioTo, values.ratioTo);
+      positive("ratioFrom", ratioFrom, values.ratioFrom);
+    } else {
+      positive("amount", amount, values.amount);
     }
-    if (parseDecimal(fee || "0") === null || values.fee < 0) result.fee = "tx.errorNotNegative";
+    if (!isSplit && (parseDecimal(fee || "0") === null || values.fee < 0)) {
+      result.fee = "tx.errorNotNegative";
+    }
     if (hasTax && (parseDecimal(tax || "0") === null || values.tax < 0)) {
       result.tax = "tx.errorNotNegative";
     }
@@ -107,7 +118,9 @@ export function TransactionForm({
     const common = { date, fee: values.fee, tax: values.tax, note: note.trim() || null };
     const draft: TransactionDraft = isTrade
       ? { ...common, type, quantity: values.quantity!, price: values.price! }
-      : { ...common, type: "DIVIDEND", amount: values.amount! };
+      : isSplit
+        ? { ...common, type: "SPLIT", ratioTo: values.ratioTo!, ratioFrom: values.ratioFrom! }
+        : { ...common, type: "DIVIDEND", amount: values.amount! };
 
     setBusy(true);
     try {
@@ -192,14 +205,22 @@ export function TransactionForm({
         </div>
         {isTrade
           ? field("quantity", t("tx.quantity"), quantity, setQuantity)
-          : field("amount", t("tx.amount", { currency }), amount, setAmount)}
+          : !isSplit && field("amount", t("tx.amount", { currency }), amount, setAmount)}
       </div>
 
-      <div className="form-row">
-        {isTrade && field("price", t("tx.price", { currency }), price, setPrice)}
-        {field("fee", t("tx.fee", { currency }), fee, setFee)}
-        {!isTrade && field("tax", t("tx.tax", { currency }), tax, setTax, t("tx.taxHintDividend"))}
-      </div>
+      {isSplit ? (
+        <div className="form-row">
+          {field("ratioFrom", t("tx.ratioFrom"), ratioFrom, setRatioFrom)}
+          {field("ratioTo", t("tx.ratioTo"), ratioTo, setRatioTo, t("tx.ratioHint"))}
+        </div>
+      ) : (
+        <div className="form-row">
+          {isTrade && field("price", t("tx.price", { currency }), price, setPrice)}
+          {field("fee", t("tx.fee", { currency }), fee, setFee)}
+          {type === "DIVIDEND" &&
+            field("tax", t("tx.tax", { currency }), tax, setTax, t("tx.taxHintDividend"))}
+        </div>
+      )}
 
       {type === "SELL" && (
         <div className="form-row">
@@ -217,10 +238,21 @@ export function TransactionForm({
         />
       </div>
 
-      <div className="form-total">
-        <span>{t("tx.total")}</span>
-        <span>{money(total, currency)}</span>
-      </div>
+      {isSplit ? (
+        <div className="form-total">
+          <span>{t("tx.ratio")}</span>
+          <span>
+            {values.ratioFrom! > 0 && values.ratioTo! > 0
+              ? `${formatQuantity(values.ratioFrom!)} → ${formatQuantity(values.ratioTo!)}`
+              : t("common.notAvailable")}
+          </span>
+        </div>
+      ) : (
+        <div className="form-total">
+          <span>{t("tx.total")}</span>
+          <span>{money(total, currency)}</span>
+        </div>
+      )}
 
       {formError && (
         <p className="form-error" role="alert">

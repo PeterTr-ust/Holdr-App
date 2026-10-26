@@ -14,8 +14,14 @@ import {
   type ReactNode,
 } from "react";
 import { backupFileName, createBackup, parseBackup, type BackupFile } from "../domain/backup";
+import {
+  findSuggestions,
+  type CorporateActions,
+  type Suggestion,
+} from "../domain/corporateActions";
 import { entitlementFor, type Entitlement, type License } from "../domain/license";
 import { computePosition, OversellError, type PositionSummary } from "../domain/portfolio";
+import type { InstrumentProfile, UpcomingEvents } from "../domain/profile";
 import type {
   Instrument,
   InstrumentSearchResult,
@@ -33,6 +39,7 @@ import {
   type PortfolioValuation,
   type Statistics,
 } from "../domain/valuation";
+import type { MarketCacheEntry } from "../data/repository";
 import { createConverter, requiredRateSymbols } from "../market/currency";
 import type { HistoryRange, QuoteDetails } from "../market/provider";
 import type { Services } from "../platform/services";
@@ -40,6 +47,26 @@ import { todayIso } from "../util/input";
 
 /** How often quotes are refreshed while the app is open. */
 const REFRESH_INTERVAL_MS = 5 * 60 * 1000;
+
+const HOUR_MS = 60 * 60 * 1000;
+const DAY_MS = 24 * HOUR_MS;
+/** How long fetched market details stay valid, per kind of data. */
+const MAX_AGE_MS = { actions: DAY_MS, events: DAY_MS, profile: 30 * DAY_MS } as const;
+/** Pause before a failed market detail request is tried again. */
+const RETRY_AFTER_MS = HOUR_MS;
+
+type DetailKind = keyof typeof MAX_AGE_MS;
+/** Cached corporate actions remember from which date on they were requested. */
+type CachedActions = CorporateActions & { since: string };
+
+const cacheKey = (kind: DetailKind, symbol: string) => `${kind}|${symbol}`;
+
+/** Which optional data the market data provider offers. */
+export interface MarketCapabilities {
+  corporateActions: boolean;
+  profiles: boolean;
+  upcomingEvents: boolean;
+}
 
 export interface QuoteStatus {
   refreshing: boolean;
@@ -70,6 +97,15 @@ export interface AppState {
   quotes: ReadonlyMap<string, Quote>;
   addToWatchlist(result: InstrumentSearchResult, quote: QuoteDetails): Promise<WatchlistItem>;
   removeFromWatchlist(item: WatchlistItem): Promise<void>;
+
+  capabilities: MarketCapabilities;
+  /** Sector and country per symbol, as far as loaded. */
+  profiles: ReadonlyMap<string, InstrumentProfile>;
+  upcomingEvents: ReadonlyMap<string, UpcomingEvents>;
+  corporateActions: ReadonlyMap<string, CorporateActions>;
+  /** Dividends and splits of held shares that are not recorded yet, newest first. */
+  suggestions: Suggestion[];
+  dismissSuggestion(suggestion: Suggestion): Promise<void>;
 
   /** Free or Pro, derived from the activated license. */
   entitlement: Entitlement;
@@ -124,6 +160,8 @@ interface InitialData {
   transactions: Transaction[];
   watchlist: WatchlistItem[];
   quotes: Quote[];
+  marketCache: MarketCacheEntry[];
+  dismissedSuggestions: string[];
   /** Verified license, or null if none is stored or the stored key is invalid. */
   license: License | null;
 }
@@ -131,12 +169,22 @@ interface InitialData {
 /** Loads everything needed for the first render. */
 export async function loadInitialData(services: Services): Promise<InitialData> {
   const { repository } = services;
-  const [storedSettings, instruments, transactions, watchlist, quotes] = await Promise.all([
+  const [
+    storedSettings,
+    instruments,
+    transactions,
+    watchlist,
+    quotes,
+    marketCache,
+    dismissedSuggestions,
+  ] = await Promise.all([
     repository.loadSettings(),
     repository.listInstruments(),
     repository.listTransactions(),
     repository.listWatchlist(),
     repository.listCachedQuotes(),
+    repository.listMarketCache(),
+    repository.listDismissedSuggestions(),
   ]);
   const licenseKey = await repository.loadLicenseKey();
   // A stored key that no longer verifies (e.g. after a key change) counts as no license.
@@ -147,6 +195,8 @@ export async function loadInitialData(services: Services): Promise<InitialData> 
     transactions,
     watchlist,
     quotes,
+    marketCache,
+    dismissedSuggestions,
     license,
   };
 }
@@ -177,6 +227,15 @@ export function AppStateProvider({
     lastUpdated: latestFetch(initial.quotes),
   }));
   const historyCache = useRef(new Map<string, Promise<SeriesPoint[]>>());
+  const [marketCache, setMarketCache] = useState(
+    () => new Map(initial.marketCache.map((entry) => [entry.key, entry])),
+  );
+  const [dismissed, setDismissed] = useState(() => new Set(initial.dismissedSuggestions));
+  // Failed detail requests per cache key, so they are not repeated on every refresh.
+  const failedDetails = useRef(new Map<string, number>());
+  const syncingDetails = useRef(false);
+  // Latest syncMarketDetails, so refreshes and effects can call it without depending on it.
+  const syncRef = useRef<() => Promise<void>>(async () => {});
   // Incremented when all data is replaced, so quotes are fetched again.
   const [dataGeneration, setDataGeneration] = useState(0);
 
@@ -209,6 +268,41 @@ export function AppStateProvider({
     [positions, valuation, convert],
   );
 
+  const capabilities: MarketCapabilities = {
+    corporateActions: Boolean(market.getCorporateActions),
+    profiles: Boolean(market.getProfile),
+    upcomingEvents: Boolean(market.getUpcomingEvents),
+  };
+
+  const { profiles, upcomingEvents, corporateActions } = useMemo(() => {
+    const byKind = <T,>(kind: DetailKind) => {
+      const map = new Map<string, T>();
+      for (const entry of marketCache.values()) {
+        const [entryKind, symbol] = entry.key.split("|", 2);
+        if (entryKind === kind && symbol) map.set(symbol, entry.value as T);
+      }
+      return map;
+    };
+    return {
+      profiles: byKind<InstrumentProfile>("profile"),
+      upcomingEvents: byKind<UpcomingEvents>("events"),
+      corporateActions: byKind<CorporateActions>("actions"),
+    };
+  }, [marketCache]);
+
+  const suggestions = useMemo(
+    () =>
+      positions
+        .flatMap((position) => {
+          const actions = corporateActions.get(position.instrument.symbol);
+          return actions
+            ? findSuggestions(position.instrument, position.transactions, actions, dismissed)
+            : [];
+        })
+        .sort((a, b) => b.event.date.localeCompare(a.event.date)),
+    [positions, corporateActions, dismissed],
+  );
+
   // --- Quotes -------------------------------------------------------------
 
   const refreshQuotes = useCallback(async () => {
@@ -238,6 +332,8 @@ export function AppStateProvider({
       failed: fresh.length < symbols.length,
       lastUpdated: latestFetch(fresh) ?? status.lastUpdated,
     }));
+    // Picks up details that became outdated while the app was open.
+    void syncRef.current();
   }, [positions, instruments, watchlist, settings.displayCurrency, market, repository]);
 
   // Refresh on startup, when relevant inputs change and periodically.
@@ -258,6 +354,85 @@ export function AppStateProvider({
     const timer = window.setInterval(() => void refreshRef.current(), REFRESH_INTERVAL_MS);
     return () => window.clearInterval(timer);
   }, []);
+
+  /**
+   * Loads dividends and splits, profiles and upcoming dates that are missing
+   * or outdated, one request at a time to go easy on the provider.
+   */
+  const syncMarketDetails = useCallback(async () => {
+    if (syncingDetails.current) return;
+    syncingDetails.current = true;
+    const now = Date.now();
+    const needsUpdate = (key: string, maxAge: number, usable = (_value: unknown) => true) => {
+      if (now - (failedDetails.current.get(key) ?? 0) < RETRY_AFTER_MS) return false;
+      const entry = marketCache.get(key);
+      return !entry || now - Date.parse(entry.fetchedAt) > maxAge || !usable(entry.value);
+    };
+
+    const tasks: { key: string; load(): Promise<unknown> }[] = [];
+    for (const position of positions) {
+      const { symbol } = position.instrument;
+      const since = position.transactions[0]?.date;
+      const { getCorporateActions, getProfile, getUpcomingEvents } = market;
+      if (getCorporateActions && since) {
+        const key = cacheKey("actions", symbol);
+        const coversSince = (value: unknown) => (value as CachedActions).since <= since;
+        if (needsUpdate(key, MAX_AGE_MS.actions, coversSince)) {
+          tasks.push({
+            key,
+            load: async () => ({
+              since,
+              ...(await getCorporateActions.call(market, symbol, since)),
+            }),
+          });
+        }
+      }
+      if (position.quantity <= 0) continue;
+      if (getProfile && needsUpdate(cacheKey("profile", symbol), MAX_AGE_MS.profile)) {
+        tasks.push({
+          key: cacheKey("profile", symbol),
+          load: () => getProfile.call(market, symbol),
+        });
+      }
+      if (getUpcomingEvents && needsUpdate(cacheKey("events", symbol), MAX_AGE_MS.events)) {
+        tasks.push({
+          key: cacheKey("events", symbol),
+          load: () => getUpcomingEvents.call(market, symbol),
+        });
+      }
+    }
+
+    try {
+      for (const task of tasks) {
+        try {
+          const entry = {
+            key: task.key,
+            value: await task.load(),
+            fetchedAt: new Date().toISOString(),
+          };
+          await repository.saveMarketCache(entry);
+          failedDetails.current.delete(task.key);
+          setMarketCache((previous) => new Map(previous).set(entry.key, entry));
+        } catch {
+          // Keep any older entry and try again later.
+          failedDetails.current.set(task.key, Date.now());
+        }
+      }
+    } finally {
+      syncingDetails.current = false;
+    }
+  }, [positions, marketCache, market, repository]);
+
+  useEffect(() => {
+    syncRef.current = syncMarketDetails;
+  });
+  const detailsKey = [
+    dataGeneration,
+    ...positions.map((p) => `${p.instrument.symbol}:${p.transactions[0]?.date}:${p.quantity > 0}`),
+  ].join("|");
+  useEffect(() => {
+    void syncRef.current();
+  }, [detailsKey]);
 
   const getHistory = useCallback(
     (symbol: string, range: HistoryRange) => {
@@ -365,11 +540,11 @@ export function AppStateProvider({
 
   const exportBackup = useCallback(async () => {
     const backup = createBackup(
-      { instruments, transactions, watchlist, settings },
+      { instruments, transactions, watchlist, dismissedSuggestions: [...dismissed], settings },
       __APP_VERSION__,
     );
     return services.backupFiles.save(backupFileName(), JSON.stringify(backup, null, 2));
-  }, [instruments, transactions, watchlist, settings, services.backupFiles]);
+  }, [instruments, transactions, watchlist, dismissed, settings, services.backupFiles]);
 
   const readBackup = useCallback(async () => {
     const text = await services.backupFiles.open();
@@ -383,6 +558,7 @@ export function AppStateProvider({
       setInstruments(backup.instruments);
       setTransactions(backup.transactions);
       setWatchlist(backup.watchlist);
+      setDismissed(new Set(backup.dismissedSuggestions));
       setSettings(backup.settings);
       setQuotes(new Map());
       setQuoteStatus({ refreshing: false, failed: false, lastUpdated: null });
@@ -413,6 +589,14 @@ export function AppStateProvider({
     async (item: WatchlistItem) => {
       await repository.removeFromWatchlist(item.id);
       setWatchlist((list) => list.filter((w) => w.id !== item.id));
+    },
+    [repository],
+  );
+
+  const dismissSuggestion = useCallback(
+    async (suggestion: Suggestion) => {
+      await repository.dismissSuggestion(suggestion.key);
+      setDismissed((previous) => new Set(previous).add(suggestion.key));
     },
     [repository],
   );
@@ -449,6 +633,12 @@ export function AppStateProvider({
     quotes,
     addToWatchlist,
     removeFromWatchlist,
+    capabilities,
+    profiles,
+    upcomingEvents,
+    corporateActions,
+    suggestions,
+    dismissSuggestion,
     entitlement,
     activateLicense,
     removeLicense,

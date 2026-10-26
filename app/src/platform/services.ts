@@ -3,11 +3,12 @@
  * the environment the UI runs in.
  *
  * - Inside the desktop shell (Tauri): SQLite + live Yahoo Finance data.
- *   HTTP goes through the Rust side, which is not subject to browser CORS.
+ *   HTTP goes through the Rust side, which is not subject to browser CORS;
+ *   the quote summary uses a dedicated command with its own cookie session.
  * - In a plain browser (`npm run dev`): in-memory storage with sample data
  *   and made-up prices, so the UI can be developed without the shell.
  */
-import { isTauri } from "@tauri-apps/api/core";
+import { invoke, isTauri } from "@tauri-apps/api/core";
 import type { PortfolioRepository } from "../data/repository";
 import type { MarketDataProvider } from "../market/provider";
 import type { BackupFiles } from "./files";
@@ -34,7 +35,9 @@ export async function createServices(): Promise<Services> {
     ]);
     return {
       repository: await sqlite.SqliteRepository.open(),
-      market: new yahoo.YahooFinanceProvider(http.fetch),
+      market: new yahoo.YahooFinanceProvider(http.fetch, async (symbol, modules) =>
+        JSON.parse(await invoke<string>("yahoo_quote_summary", { symbol, modules })),
+      ),
       backupFiles: await files.createDesktopBackupFiles(),
       verifyLicense: await license.createDesktopLicenseVerifier(),
       isPreview: false,

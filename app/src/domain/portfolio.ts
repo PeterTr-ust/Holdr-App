@@ -7,13 +7,21 @@
  * separately, so gains and the tax paid on them can both be shown.
  * All amounts in this module are in the instrument's own currency.
  */
-import type { Instrument, TradeTransaction, Transaction } from "./types";
+import type { Instrument, SplitTransaction, TradeTransaction, Transaction } from "./types";
 
 /** Tolerance for floating point share counts (fractional shares). */
 const QUANTITY_EPSILON = 1e-9;
 
-/** Order in which transactions on the same day are applied. */
-const SAME_DAY_ORDER: Record<Transaction["type"], number> = { BUY: 0, DIVIDEND: 1, SELL: 2 };
+/**
+ * Order in which transactions on the same day are applied. A split comes
+ * first: trades on the split's effective date are already in new shares.
+ */
+const SAME_DAY_ORDER: Record<Transaction["type"], number> = {
+  SPLIT: 0,
+  BUY: 1,
+  DIVIDEND: 2,
+  SELL: 3,
+};
 
 /** A realized result: a closed (part of a) lot or a dividend payment. */
 export interface RealizedEvent {
@@ -70,7 +78,7 @@ export class OversellError extends Error {
   }
 }
 
-/** Sorts transactions chronologically; on the same day buys come before sells. */
+/** Sorts transactions chronologically; on the same day splits come first and sells last. */
 export function sortTransactions<T extends Pick<Transaction, "date" | "type" | "id">>(
   transactions: readonly T[],
 ): T[] {
@@ -125,6 +133,15 @@ export function computePosition(
         break;
       }
 
+      case "SPLIT": {
+        const factor = splitFactor(tx);
+        for (const lot of openLots) {
+          lot.quantity *= factor;
+          lot.unitCost /= factor;
+        }
+        break;
+      }
+
       case "DIVIDEND":
         events.push({
           transactionId: tx.id,
@@ -175,12 +192,31 @@ export function findOversell(
 /** Returns the number of shares held at the end of the given date. */
 export function quantityAt(transactions: readonly Transaction[], date: string): number {
   let quantity = 0;
-  for (const tx of transactions) {
-    if (tx.date > date) continue;
+  for (const tx of sortTransactions(transactions)) {
+    if (tx.date > date) break;
     if (tx.type === "BUY") quantity += tx.quantity;
     if (tx.type === "SELL") quantity -= tx.quantity;
+    if (tx.type === "SPLIT") quantity *= splitFactor(tx);
   }
   return Math.max(0, quantity);
+}
+
+/**
+ * Combined factor of all splits after the given date. Price histories are
+ * split-adjusted, so a share count from that date times this factor matches
+ * the adjusted price.
+ */
+export function splitFactorAfter(transactions: readonly Transaction[], date: string): number {
+  let factor = 1;
+  for (const tx of transactions) {
+    if (tx.type === "SPLIT" && tx.date > date) factor *= splitFactor(tx);
+  }
+  return factor;
+}
+
+/** How many new shares one old share becomes, e.g. 4 for a 4-for-1 split. */
+export function splitFactor(split: Pick<SplitTransaction, "ratioTo" | "ratioFrom">): number {
+  return split.ratioTo / split.ratioFrom;
 }
 
 /** Removes shares from the oldest lots first and returns their purchase cost. */

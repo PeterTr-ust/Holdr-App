@@ -29,6 +29,8 @@ export interface I18n {
   timestamp(iso: string): string;
   /** Formats an ISO timestamp as full date and time. */
   dateTime(iso: string): string;
+  /** Name of a country from its ISO code, e.g. "DE" → "Deutschland". */
+  country(code: string): string;
 }
 
 const I18nContext = createContext<I18n | null>(null);
@@ -60,6 +62,7 @@ export function createI18n(language: Language): I18n {
     dateStyle: "short",
     timeStyle: "short",
   });
+  const regionNames = new Intl.DisplayNames([locale], { type: "region" });
 
   const moneyFormat = (currency: CurrencyCode): Intl.NumberFormat => {
     let format = moneyFormats.get(currency);
@@ -98,5 +101,6 @@ export function createI18n(language: Language): I18n {
       return (isToday ? timeFormat : dateTimeFormat).format(date);
     },
     dateTime: (iso) => dateTimeFormat.format(new Date(iso)),
+    country: (code) => regionNames.of(code) ?? code,
   };
 }

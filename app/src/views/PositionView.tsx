@@ -1,6 +1,7 @@
 /**
- * Detail screen of one instrument: key figures, price chart and all
- * transactions with options to add, edit and delete them.
+ * Detail screen of one instrument: key figures, profile and upcoming dates,
+ * price chart, suggested dividends and splits, and all transactions with
+ * options to add, edit and delete them.
  */
 import { useState } from "react";
 import { ConfirmDialog } from "../components/ConfirmDialog";
@@ -10,24 +11,41 @@ import { tone } from "../components/tone";
 import { TransactionForm } from "../components/TransactionForm";
 import { useInstrumentSeries } from "../components/useSeries";
 import { ValueChart } from "../components/ValueChart";
+import { estimateNextExDate, type Suggestion } from "../domain/corporateActions";
 import { OversellError } from "../domain/portfolio";
 import type { Transaction, TransactionType } from "../domain/types";
 import { useI18n } from "../i18n";
 import type { HistoryRange } from "../market/provider";
-import { useApp } from "../state/AppState";
+import { useApp, type TransactionDraft } from "../state/AppState";
+import { todayIso } from "../util/input";
 
 interface PositionViewProps {
   instrumentId: number;
   onBack(): void;
 }
 
-type Editing = { mode: "new"; type: TransactionType } | { mode: "edit"; transaction: Transaction };
+type Editing =
+  | { mode: "new"; type: TransactionType; draft?: TransactionDraft }
+  | { mode: "edit"; transaction: Transaction };
+
+/** A suggestion as a prefilled transaction; dividends start without taxes, the user adds them. */
+function draftFor(suggestion: Suggestion): TransactionDraft {
+  const common = { date: suggestion.event.date, fee: 0, tax: 0, note: null };
+  return suggestion.kind === "DIVIDEND"
+    ? { ...common, type: "DIVIDEND", amount: Math.round(suggestion.amount * 100) / 100 }
+    : {
+        ...common,
+        type: "SPLIT",
+        ratioTo: suggestion.event.ratioTo,
+        ratioFrom: suggestion.event.ratioFrom,
+      };
+}
 
 export function PositionView({ instrumentId, onBack }: PositionViewProps) {
   const i18n = useI18n();
   const { t, money, percent, quantity, date } = i18n;
   const app = useApp();
-  const { settings, valuation, positions, convert } = app;
+  const { settings, valuation, positions, convert, capabilities } = app;
   const [range, setRange] = useState<HistoryRange>("1y");
   const [editing, setEditing] = useState<Editing | null>(null);
   const [deletingTx, setDeletingTx] = useState<Transaction | null>(null);
@@ -46,13 +64,25 @@ export function PositionView({ instrumentId, onBack }: PositionViewProps) {
   const dividends = position ? convert(position.dividends, instrument.currency) : null;
   const quote = holding?.quote;
 
-  // Amount paid for a purchase, or received for a sale or dividend.
-  const transactionTotal = (tx: Transaction) =>
-    tx.type === "DIVIDEND"
-      ? tx.amount - tx.fee - tx.tax
-      : tx.type === "BUY"
-        ? tx.quantity * tx.price + tx.fee
-        : tx.quantity * tx.price - tx.fee - tx.tax;
+  const profile = app.profiles.get(instrument.symbol);
+  const upcoming = app.upcomingEvents.get(instrument.symbol);
+  const actions = app.corporateActions.get(instrument.symbol);
+  const suggestions = app.suggestions.filter((s) => s.instrument.id === instrumentId);
+  const estimatedExDate = actions ? estimateNextExDate(actions.dividends, todayIso()) : null;
+
+  // Amount paid for a purchase, or received for a sale or dividend; none for a split.
+  const transactionTotal = (tx: Transaction) => {
+    switch (tx.type) {
+      case "DIVIDEND":
+        return tx.amount - tx.fee - tx.tax;
+      case "BUY":
+        return tx.quantity * tx.price + tx.fee;
+      case "SELL":
+        return tx.quantity * tx.price - tx.fee - tx.tax;
+      case "SPLIT":
+        return null;
+    }
+  };
 
   return (
     <>
@@ -116,6 +146,70 @@ export function PositionView({ instrumentId, onBack }: PositionViewProps) {
         />
       </dl>
 
+      {(capabilities.profiles || (capabilities.upcomingEvents && holding)) && (
+        <section className="section" aria-label={t("position.profileTitle")}>
+          <dl className="facts">
+            {capabilities.profiles && (
+              <>
+                <Fact
+                  label={t("position.sector")}
+                  value={
+                    profile?.sector
+                      ? t(`sector.${profile.sector}`)
+                      : profile?.sectorWeights
+                        ? t("position.sectorFund")
+                        : t("common.notAvailable")
+                  }
+                  hint={profile?.industry ?? undefined}
+                />
+                <Fact
+                  label={t("position.country")}
+                  value={
+                    profile?.country ? i18n.country(profile.country) : t("common.notAvailable")
+                  }
+                />
+              </>
+            )}
+            {capabilities.upcomingEvents && holding && (
+              <>
+                <Fact
+                  label={t("position.nextExDate")}
+                  value={
+                    upcoming?.exDividendDate
+                      ? date(upcoming.exDividendDate)
+                      : estimatedExDate
+                        ? t("position.estimated", { date: date(estimatedExDate) })
+                        : t("common.notAvailable")
+                  }
+                  hint={
+                    !upcoming?.exDividendDate && estimatedExDate
+                      ? t("position.estimatedHint")
+                      : undefined
+                  }
+                />
+                <Fact
+                  label={t("position.nextPayment")}
+                  value={
+                    upcoming?.dividendPaymentDate
+                      ? date(upcoming.dividendPaymentDate)
+                      : t("common.notAvailable")
+                  }
+                />
+                <Fact
+                  label={t("position.nextEarnings")}
+                  value={
+                    upcoming?.earningsDate ? date(upcoming.earningsDate) : t("common.notAvailable")
+                  }
+                  hint={
+                    upcoming?.earningsDateEstimated ? t("position.earningsEstimated") : undefined
+                  }
+                />
+              </>
+            )}
+          </dl>
+        </section>
+      )}
+
       <ValueChart
         series={series}
         status={status}
@@ -124,28 +218,74 @@ export function PositionView({ instrumentId, onBack }: PositionViewProps) {
         onRangeChange={setRange}
       />
 
+      {suggestions.length > 0 && (
+        <section className="section">
+          <h2 className="section-title">
+            {t("suggest.title")} <small>{suggestions.length}</small>
+          </h2>
+          <p className="muted section-intro">{t("suggest.intro")}</p>
+          <div className="rows">
+            {suggestions.map((suggestion) => (
+              <div key={suggestion.key} className="suggestion">
+                <span>
+                  <span className={`chip ${suggestion.kind}`}>{t(`tx.${suggestion.kind}`)}</span>
+                </span>
+                <span className="suggestion-text">
+                  {suggestion.kind === "DIVIDEND"
+                    ? t("suggest.dividend", {
+                        date: date(suggestion.event.date),
+                        shares: quantity(suggestion.shares),
+                        amount: money(suggestion.amount, instrument.currency),
+                      })
+                    : t("suggest.split", {
+                        date: date(suggestion.event.date),
+                        ratio: t("tx.splitRatio", {
+                          to: quantity(suggestion.event.ratioTo),
+                          from: quantity(suggestion.event.ratioFrom),
+                        }),
+                        before: quantity(suggestion.sharesBefore),
+                        after: quantity(suggestion.sharesAfter),
+                      })}
+                </span>
+                <span className="tx-actions">
+                  <button
+                    type="button"
+                    onClick={() =>
+                      setEditing({
+                        mode: "new",
+                        type: suggestion.kind,
+                        draft: draftFor(suggestion),
+                      })
+                    }
+                  >
+                    {t("suggest.accept")}
+                  </button>
+                  <button type="button" onClick={() => void app.dismissSuggestion(suggestion)}>
+                    {t("suggest.dismiss")}
+                  </button>
+                </span>
+              </div>
+            ))}
+          </div>
+        </section>
+      )}
+
       <section className="section">
         <div className="toolbar">
           <h2 className="section-title" style={{ margin: 0 }}>
             {t("position.transactions")} <small>{transactions.length}</small>
           </h2>
           <span className="spacer" />
-          {(["BUY", "SELL", "DIVIDEND"] as const).map((type) => (
+          {(["BUY", "SELL", "DIVIDEND", "SPLIT"] as const).map((type) => (
             <button
               key={type}
               type="button"
               className="btn btn-quiet"
-              disabled={type === "SELL" && !holding}
+              disabled={(type === "SELL" || type === "SPLIT") && !holding}
               onClick={() => setEditing({ mode: "new", type })}
             >
               <PlusIcon />
-              {t(
-                type === "BUY"
-                  ? "position.addBuy"
-                  : type === "SELL"
-                    ? "position.addSell"
-                    : "position.addDividend",
-              )}
+              {t(ADD_LABELS[type])}
             </button>
           ))}
         </div>
@@ -169,9 +309,24 @@ export function PositionView({ instrumentId, onBack }: PositionViewProps) {
                   <span>
                     <span className={`chip ${tx.type}`}>{t(`tx.${tx.type}`)}</span>
                   </span>
-                  <span>{tx.type === "DIVIDEND" ? "" : quantity(tx.quantity)}</span>
-                  <span>{tx.type === "DIVIDEND" ? "" : money(tx.price, instrument.currency)}</span>
-                  <span>{money(transactionTotal(tx), instrument.currency)}</span>
+                  <span>
+                    {tx.type === "SPLIT"
+                      ? t("tx.splitRatio", {
+                          to: quantity(tx.ratioTo),
+                          from: quantity(tx.ratioFrom),
+                        })
+                      : tx.type === "DIVIDEND"
+                        ? ""
+                        : quantity(tx.quantity)}
+                  </span>
+                  <span>
+                    {tx.type === "BUY" || tx.type === "SELL"
+                      ? money(tx.price, instrument.currency)
+                      : ""}
+                  </span>
+                  <span>
+                    {tx.type === "SPLIT" ? "" : money(transactionTotal(tx), instrument.currency)}
+                  </span>
                   <span className="tx-actions">
                     <button
                       type="button"
@@ -207,8 +362,9 @@ export function PositionView({ instrumentId, onBack }: PositionViewProps) {
         >
           <TransactionForm
             currency={instrument.currency}
-            initial={editing.mode === "edit" ? editing.transaction : undefined}
+            initial={editing.mode === "edit" ? editing.transaction : editing.draft}
             initialType={editing.mode === "new" ? editing.type : undefined}
+            types={editing.mode === "new" && editing.draft ? [editing.type] : undefined}
             suggestedPrice={quote?.price ?? null}
             submitLabel={t("common.save")}
             onCancel={() => setEditing(null)}
@@ -269,17 +425,27 @@ export function PositionView({ instrumentId, onBack }: PositionViewProps) {
   );
 }
 
+const ADD_LABELS = {
+  BUY: "position.addBuy",
+  SELL: "position.addSell",
+  DIVIDEND: "position.addDividend",
+  SPLIT: "position.addSplit",
+} as const;
+
 interface FactProps {
   label: string;
   value: string;
   tone?: string;
+  /** Small text below the value. */
+  hint?: string;
 }
 
-function Fact({ label, value, tone: valueTone }: FactProps) {
+function Fact({ label, value, tone: valueTone, hint }: FactProps) {
   return (
     <div>
       <dt>{label}</dt>
       <dd className={valueTone}>{value}</dd>
+      {hint && <small className="fact-hint">{hint}</small>}
     </div>
   );
 }

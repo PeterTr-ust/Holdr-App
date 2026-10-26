@@ -1,7 +1,7 @@
 /**
  * Backup file format: a self-contained JSON snapshot of all instruments,
- * transactions, watchlist entries and settings. Cached quotes are not included; they are
- * fetched again after an import.
+ * transactions, watchlist entries, dismissed suggestions and settings. Cached
+ * market data is not included; it is fetched again after an import.
  *
  * Imports are validated completely before anything is written, so a broken
  * or foreign file can never leave the database half replaced.
@@ -18,16 +18,19 @@ import {
 
 export const BACKUP_FORMAT = "holdr-backup";
 /**
- * Version 2 added the watchlist, version 3 separate taxes. Older files are
- * still accepted: a missing watchlist is empty, missing taxes are 0.
+ * Version 2 added the watchlist, version 3 separate taxes, version 4 splits
+ * and dismissed suggestions. Older files are still accepted: a missing
+ * watchlist or list of dismissed suggestions is empty, missing taxes are 0.
  */
-export const BACKUP_VERSION = 3;
+export const BACKUP_VERSION = 4;
 
 /** The data a backup restores. */
 export interface BackupData {
   instruments: Instrument[];
   transactions: Transaction[];
   watchlist: WatchlistItem[];
+  /** Keys of dividend and split suggestions the user dismissed. */
+  dismissedSuggestions: string[];
   settings: Settings;
 }
 
@@ -60,6 +63,7 @@ export function createBackup(data: BackupData, appVersion: string, now = new Dat
     instruments: data.instruments,
     transactions: data.transactions,
     watchlist: data.watchlist,
+    dismissedSuggestions: data.dismissedSuggestions,
     settings: data.settings,
   };
 }
@@ -97,6 +101,14 @@ export function parseBackup(text: string): BackupFile {
     file.watchlist === undefined && file.version < 2
       ? []
       : asArray(file.watchlist, "watchlist").map(parseWatchlistItem);
+  const dismissedSuggestions =
+    file.dismissedSuggestions === undefined && file.version < 4
+      ? []
+      : asArray(file.dismissedSuggestions, "dismissedSuggestions").map((key, index) => {
+          if (typeof key !== "string" || key === "")
+            invalid(`dismissedSuggestions[${index}] is invalid.`);
+          return key;
+        });
   const settings = parseSettings(file.settings);
 
   assertUnique(
@@ -143,6 +155,7 @@ export function parseBackup(text: string): BackupFile {
     instruments,
     transactions,
     watchlist,
+    dismissedSuggestions: [...new Set(dismissedSuggestions)],
     settings,
   };
 }
@@ -151,7 +164,7 @@ export function parseBackup(text: string): BackupFile {
 // Field validation
 // ---------------------------------------------------------------------------
 
-const TRANSACTION_TYPES: readonly TransactionType[] = ["BUY", "SELL", "DIVIDEND"];
+const TRANSACTION_TYPES: readonly TransactionType[] = ["BUY", "SELL", "DIVIDEND", "SPLIT"];
 const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
 
 function parseInstrument(value: unknown, index: number): Instrument {
@@ -172,7 +185,8 @@ function parseTransaction(value: unknown, index: number): Transaction {
   const where = `transactions[${index}]`;
   const r = asRecord(value, "invalid", where);
   const type = r.type as TransactionType;
-  if (!TRANSACTION_TYPES.includes(type)) invalid(`${where}.type is not BUY, SELL or DIVIDEND.`);
+  if (!TRANSACTION_TYPES.includes(type))
+    invalid(`${where}.type is not BUY, SELL, DIVIDEND or SPLIT.`);
 
   const base = {
     id: integer(r.id, `${where}.id`),
@@ -187,6 +201,15 @@ function parseTransaction(value: unknown, index: number): Transaction {
   if (type === "BUY" && base.tax !== 0) invalid(`${where}.tax must be 0 for a purchase.`);
   if (type === "DIVIDEND") {
     return { ...base, type, amount: number(r.amount, `${where}.amount`, { min: 0 }) };
+  }
+  if (type === "SPLIT") {
+    if (base.fee !== 0 || base.tax !== 0) invalid(`${where} must have no fees or taxes.`);
+    return {
+      ...base,
+      type,
+      ratioTo: number(r.ratioTo, `${where}.ratioTo`, { min: 0, exclusive: true }),
+      ratioFrom: number(r.ratioFrom, `${where}.ratioFrom`, { min: 0, exclusive: true }),
+    };
   }
   return {
     ...base,

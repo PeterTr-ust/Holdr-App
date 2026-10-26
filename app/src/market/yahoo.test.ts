@@ -1,9 +1,22 @@
 import { describe, expect, it } from "vitest";
 import { MarketDataError } from "./provider";
-import { parseHistory, parseQuote, parseSearch, YahooFinanceProvider } from "./yahoo";
+import {
+  parseCorporateActions,
+  parseHistory,
+  parseProfile,
+  parseQuote,
+  parseSearch,
+  parseUpcomingEvents,
+  YahooFinanceProvider,
+} from "./yahoo";
 
-const chart = (meta: object, timestamp: number[] = [], close: (number | null)[] = []) => ({
-  chart: { result: [{ meta, timestamp, indicators: { quote: [{ close }] } }], error: null },
+const chart = (
+  meta: object,
+  timestamp: number[] = [],
+  close: (number | null)[] = [],
+  events?: object,
+) => ({
+  chart: { result: [{ meta, timestamp, indicators: { quote: [{ close }] }, events }], error: null },
 });
 
 describe("parseQuote", () => {
@@ -105,5 +118,147 @@ describe("YahooFinanceProvider", () => {
     });
     await expect(provider.getExchangeRate("USD", "EUR")).resolves.toBe(0.92);
     expect(urls[0]).toContain("USDEUR%3DX");
+  });
+});
+
+describe("parseCorporateActions", () => {
+  it("reads dividends and splits as exchange dates, oldest first", () => {
+    const json = chart({ symbol: "AAPL", currency: "USD", gmtoffset: -14400 }, [], [], {
+      dividends: {
+        "1731076200": { amount: 0.25, date: 1731076200 },
+        "1723469400": { amount: 0.25, date: 1723469400 },
+      },
+      splits: { "1598880600": { date: 1598880600, numerator: 4, denominator: 1 } },
+    });
+    expect(parseCorporateActions(json)).toEqual({
+      dividends: [
+        { date: "2024-08-12", amount: 0.25 },
+        { date: "2024-11-08", amount: 0.25 },
+      ],
+      splits: [{ date: "2020-08-31", ratioTo: 4, ratioFrom: 1 }],
+    });
+  });
+
+  it("converts dividends in pence into pounds and copes with no events", () => {
+    expect(parseCorporateActions(chart({ symbol: "VOD.L", currency: "GBp" }))).toEqual({
+      dividends: [],
+      splits: [],
+    });
+    const json = chart({ symbol: "VOD.L", currency: "GBp" }, [], [], {
+      dividends: { x: { amount: 4.5, date: 1700000000 } },
+    });
+    expect(parseCorporateActions(json).dividends[0]!.amount).toBeCloseTo(0.045);
+  });
+});
+
+const summary = (result: object) => ({ quoteSummary: { result: [result], error: null } });
+
+describe("parseProfile", () => {
+  it("maps sector and country to provider-independent codes", () => {
+    const profile = parseProfile(
+      summary({
+        assetProfile: {
+          sector: "Technology",
+          industry: "Software—Application",
+          country: "Germany",
+        },
+      }),
+    );
+    expect(profile).toEqual({
+      sector: "technology",
+      industry: "Software—Application",
+      country: "DE",
+      sectorWeights: null,
+    });
+  });
+
+  it("reads sector weights of funds", () => {
+    const profile = parseProfile(
+      summary({
+        topHoldings: {
+          sectorWeightings: [
+            { technology: { raw: 0.25, fmt: "25%" } },
+            { financial_services: 0.15 },
+            { realestate: { raw: 0 } },
+          ],
+        },
+      }),
+    );
+    expect(profile.sectorWeights).toEqual({ technology: 0.25, financialServices: 0.15 });
+    expect(profile.sector).toBeNull();
+  });
+
+  it("rejects an empty answer", () => {
+    expect(() => parseProfile({ quoteSummary: { result: null } })).toThrow(MarketDataError);
+  });
+});
+
+describe("parseUpcomingEvents", () => {
+  const now = new Date("2026-10-26T10:00:00Z");
+  const seconds = (date: string) => Date.parse(`${date}T00:00:00Z`) / 1000;
+
+  it("keeps future dates and flags an earnings window as estimated", () => {
+    const events = parseUpcomingEvents(
+      summary({
+        calendarEvents: {
+          exDividendDate: { raw: seconds("2026-11-10") },
+          dividendDate: { raw: seconds("2026-11-13") },
+          earnings: {
+            earningsDate: [{ raw: seconds("2027-01-28") }, { raw: seconds("2027-02-02") }],
+          },
+        },
+      }),
+      now,
+    );
+    expect(events).toEqual({
+      exDividendDate: "2026-11-10",
+      dividendPaymentDate: "2026-11-13",
+      earningsDate: "2027-01-28",
+      earningsDateEstimated: true,
+    });
+  });
+
+  it("drops dates in the past", () => {
+    const events = parseUpcomingEvents(
+      summary({
+        calendarEvents: {
+          exDividendDate: seconds("2026-05-14"),
+          earnings: { earningsDate: [seconds("2026-10-30")] },
+        },
+      }),
+      now,
+    );
+    expect(events.exDividendDate).toBeNull();
+    expect(events.earningsDate).toBe("2026-10-30");
+    expect(events.earningsDateEstimated).toBe(false);
+  });
+});
+
+describe("YahooFinanceProvider capabilities", () => {
+  it("offers profiles and dates only with a quote summary source", async () => {
+    const plain = new YahooFinanceProvider(() => Promise.reject(new Error("unused")));
+    expect(plain.getProfile).toBeUndefined();
+
+    const requested: string[][] = [];
+    const withSummary = new YahooFinanceProvider(
+      () => Promise.reject(new Error("unused")),
+      async (_symbol, modules) => {
+        requested.push([...modules]);
+        return summary({ assetProfile: { sector: "Energy", country: "Norway" } });
+      },
+    );
+    await expect(withSummary.getProfile?.("EQNR")).resolves.toMatchObject({
+      sector: "energy",
+      country: "NO",
+    });
+    expect(requested).toEqual([["assetProfile", "topHoldings"]]);
+  });
+
+  it("wraps quote summary failures in MarketDataError", async () => {
+    const provider = new YahooFinanceProvider(
+      () => Promise.reject(new Error("unused")),
+      () => Promise.reject(new Error("no session")),
+    );
+    await expect(provider.getUpcomingEvents?.("SAP.DE")).rejects.toBeInstanceOf(MarketDataError);
   });
 });

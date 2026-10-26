@@ -1,9 +1,17 @@
 /**
  * Statistics: realized gains and losses, dividends, fees and unrealized
- * results, in total, per year and per position.
+ * results, in total, per year and per position, and the diversification of
+ * the current holdings by sector and country.
  */
+import { useMemo } from "react";
 import { tone } from "../components/tone";
-import { useI18n } from "../i18n";
+import {
+  computeAllocation,
+  SECTORS,
+  type AllocationKey,
+  type AllocationSlice,
+} from "../domain/profile";
+import { useI18n, type I18n } from "../i18n";
 import { useApp } from "../state/AppState";
 
 interface StatisticsViewProps {
@@ -12,7 +20,11 @@ interface StatisticsViewProps {
 
 export function StatisticsView({ onOpenPosition }: StatisticsViewProps) {
   const { t, money, percent } = useI18n();
-  const { statistics: stats, settings } = useApp();
+  const { statistics: stats, settings, valuation, profiles, capabilities } = useApp();
+  const allocation = useMemo(
+    () => computeAllocation(valuation.holdings, profiles),
+    [valuation.holdings, profiles],
+  );
   const currency = settings.displayCurrency;
   const signed = (value: number | null) => money(value, currency, { signed: true });
   const trades = stats.winningTrades + stats.losingTrades;
@@ -65,6 +77,30 @@ export function StatisticsView({ onOpenPosition }: StatisticsViewProps) {
           }
         />
       </section>
+
+      {capabilities.profiles && (
+        <section className="section">
+          <h2 className="section-title">{t("stats.allocation")}</h2>
+          {allocation.totalValue === 0 ? (
+            <p className="muted">{t("stats.allocationEmpty")}</p>
+          ) : (
+            <>
+              <p className="muted section-intro">{t("stats.allocationIntro")}</p>
+              {allocation.coveredValue < allocation.totalValue && (
+                <p className="muted section-intro">
+                  {t("stats.allocationLoading", {
+                    share: percent(1 - allocation.coveredValue / allocation.totalValue),
+                  })}
+                </p>
+              )}
+              <div className="allocation">
+                <AllocationList title={t("stats.bySector")} slices={allocation.bySector} />
+                <AllocationList title={t("stats.byCountry")} slices={allocation.byCountry} />
+              </div>
+            </>
+          )}
+        </section>
+      )}
 
       {stats.byYear.length === 0 ? (
         <p className="muted">{t("stats.empty")}</p>
@@ -144,6 +180,38 @@ export function StatisticsView({ onOpenPosition }: StatisticsViewProps) {
 
       <p className="note">{t("stats.note")}</p>
     </>
+  );
+}
+
+const SECTOR_KEYS: ReadonlySet<string> = new Set(SECTORS);
+
+function allocationLabel(key: AllocationKey, i18n: I18n): string {
+  if (key === "funds") return i18n.t("allocation.funds");
+  if (key === "unknown") return i18n.t("allocation.unknown");
+  if (SECTOR_KEYS.has(key)) return i18n.t(`sector.${key as (typeof SECTORS)[number]}`);
+  return i18n.country(key);
+}
+
+function AllocationList({ title, slices }: { title: string; slices: AllocationSlice[] }) {
+  const i18n = useI18n();
+  const { settings } = useApp();
+  return (
+    <div>
+      <h3 className="allocation-title">{title}</h3>
+      <ul className="allocation-list">
+        {slices.map((slice) => (
+          <li key={slice.key}>
+            <span>{allocationLabel(slice.key, i18n)}</span>
+            <span className="num" title={i18n.money(slice.value, settings.displayCurrency)}>
+              {i18n.percent(slice.share)}
+            </span>
+            <span className="weight" aria-hidden="true">
+              <i style={{ width: `${(slice.share * 100).toFixed(1)}%` }} />
+            </span>
+          </li>
+        ))}
+      </ul>
+    </div>
   );
 }
 

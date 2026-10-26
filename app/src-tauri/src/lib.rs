@@ -3,12 +3,15 @@
 //! The Rust side is intentionally thin: it hosts the web UI, owns the SQLite
 //! database (via `tauri-plugin-sql`) and performs HTTP requests for market
 //! data (via `tauri-plugin-http`), which are restricted to the hosts listed in
-//! `capabilities/default.json`. Backups are read and written through native
+//! `capabilities/default.json`. Yahoo's quote summary needs a session cookie
+//! and is requested by `yahoo.rs`, which keeps that cookie in memory only.
+//! Backups are read and written through native
 //! file dialogs; only the file the user picks becomes accessible. There is no
 //! telemetry of any kind.
 
 mod license;
 mod license_public_key;
+mod yahoo;
 
 use tauri_plugin_sql::{Migration, MigrationKind};
 
@@ -90,6 +93,58 @@ fn migrations() -> Vec<Migration> {
             sql: "ALTER TABLE transactions ADD COLUMN tax REAL NOT NULL DEFAULT 0;",
             kind: MigrationKind::Up,
         },
+        Migration {
+            version: 4,
+            description: "add_splits",
+            // SQLite cannot change a CHECK constraint, so the table is rebuilt.
+            sql: r#"
+            CREATE TABLE transactions_v4 (
+                id             INTEGER PRIMARY KEY AUTOINCREMENT,
+                instrument_id  INTEGER NOT NULL REFERENCES instruments(id) ON DELETE CASCADE,
+                type           TEXT    NOT NULL CHECK (type IN ('BUY', 'SELL', 'DIVIDEND', 'SPLIT')),
+                trade_date     TEXT    NOT NULL,
+                quantity       REAL,
+                price          REAL,
+                amount         REAL,
+                split_to       REAL,
+                split_from     REAL,
+                fee            REAL    NOT NULL DEFAULT 0,
+                tax            REAL    NOT NULL DEFAULT 0,
+                note           TEXT,
+                created_at     TEXT    NOT NULL,
+                CHECK (
+                    (type IN ('BUY', 'SELL') AND quantity > 0 AND price >= 0)
+                    OR (type = 'DIVIDEND' AND amount IS NOT NULL)
+                    OR (type = 'SPLIT' AND COALESCE(split_to, 0) > 0 AND COALESCE(split_from, 0) > 0)
+                )
+            );
+            INSERT INTO transactions_v4
+                (id, instrument_id, type, trade_date, quantity, price, amount, fee, tax, note, created_at)
+            SELECT id, instrument_id, type, trade_date, quantity, price, amount, fee, tax, note, created_at
+            FROM transactions;
+            DROP TABLE transactions;
+            ALTER TABLE transactions_v4 RENAME TO transactions;
+            CREATE INDEX idx_transactions_instrument ON transactions (instrument_id, trade_date);
+        "#,
+            kind: MigrationKind::Up,
+        },
+        Migration {
+            version: 5,
+            description: "create_market_cache_and_dismissed_suggestions",
+            sql: r#"
+            CREATE TABLE market_cache (
+                key         TEXT PRIMARY KEY,
+                value       TEXT NOT NULL,
+                fetched_at  TEXT NOT NULL
+            );
+
+            CREATE TABLE dismissed_suggestions (
+                key           TEXT PRIMARY KEY,
+                dismissed_at  TEXT NOT NULL
+            );
+        "#,
+            kind: MigrationKind::Up,
+        },
     ]
 }
 
@@ -106,7 +161,11 @@ pub fn run() {
         // exactly the file the user picks to the fs scope at runtime.
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_dialog::init())
-        .invoke_handler(tauri::generate_handler![license::verify_license])
+        .manage(yahoo::YahooSession::new())
+        .invoke_handler(tauri::generate_handler![
+            license::verify_license,
+            yahoo::yahoo_quote_summary
+        ])
         .run(tauri::generate_context!())
         .expect("error while running Holdr");
 }

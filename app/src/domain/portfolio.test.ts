@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { computePosition, findOversell, OversellError, quantityAt } from "./portfolio";
+import {
+  computePosition,
+  findOversell,
+  OversellError,
+  quantityAt,
+  splitFactorAfter,
+} from "./portfolio";
 import type { Instrument, Transaction } from "./types";
 
 const sap: Instrument = {
@@ -50,6 +56,21 @@ function dividend(date: string, amount: number, fee = 0, tax = 0): Transaction {
     amount,
     fee,
     tax,
+    note: null,
+    createdAt: "",
+  };
+}
+
+function split(date: string, ratioTo: number, ratioFrom = 1): Transaction {
+  return {
+    id: nextId++,
+    instrumentId: 1,
+    type: "SPLIT",
+    date,
+    ratioTo,
+    ratioFrom,
+    fee: 0,
+    tax: 0,
     note: null,
     createdAt: "",
   };
@@ -161,5 +182,48 @@ describe("quantityAt", () => {
     expect(quantityAt(txs, "2024-01-09")).toBe(0);
     expect(quantityAt(txs, "2024-01-10")).toBe(10);
     expect(quantityAt(txs, "2024-03-01")).toBe(6);
+  });
+});
+
+describe("splits", () => {
+  it("multiplies held shares and divides their cost, keeping the cost basis", () => {
+    const position = computePosition(sap, [buy("2024-01-10", 10, 400, 8), split("2024-06-10", 4)]);
+    expect(position.quantity).toBe(40);
+    expect(position.costBasis).toBeCloseTo(4008);
+    expect(position.averageCost).toBeCloseTo(100.2);
+  });
+
+  it("realizes later sales against the split-adjusted cost", () => {
+    const position = computePosition(sap, [
+      buy("2024-01-10", 10, 400),
+      split("2024-06-10", 4),
+      sell("2024-07-01", 20, 120),
+    ]);
+    expect(position.realizedTrades).toBeCloseTo(20 * 120 - 20 * 100);
+    expect(position.quantity).toBe(20);
+  });
+
+  it("applies a split before trades on the same day", () => {
+    const position = computePosition(sap, [
+      sell("2024-06-10", 30, 100),
+      buy("2024-01-10", 10, 400),
+      split("2024-06-10", 4),
+    ]);
+    expect(position.quantity).toBe(10);
+  });
+
+  it("handles reverse splits", () => {
+    const position = computePosition(sap, [buy("2024-01-10", 100, 2), split("2024-06-10", 1, 10)]);
+    expect(position.quantity).toBeCloseTo(10);
+    expect(position.averageCost).toBeCloseTo(20);
+  });
+
+  it("are reflected in quantityAt and splitFactorAfter", () => {
+    const txs = [buy("2024-01-10", 10, 400), split("2024-06-10", 4), buy("2024-07-01", 5, 100)];
+    expect(quantityAt(txs, "2024-06-09")).toBe(10);
+    expect(quantityAt(txs, "2024-06-10")).toBe(40);
+    expect(quantityAt(txs, "2024-07-01")).toBe(45);
+    expect(splitFactorAfter(txs, "2024-06-09")).toBe(4);
+    expect(splitFactorAfter(txs, "2024-06-10")).toBe(1);
   });
 });

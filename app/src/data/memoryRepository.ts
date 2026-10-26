@@ -12,13 +12,15 @@ import type {
   Transaction,
   WatchlistItem,
 } from "../domain/types";
-import type { PortfolioRepository } from "./repository";
+import type { MarketCacheEntry, PortfolioRepository } from "./repository";
 
 export class MemoryRepository implements PortfolioRepository {
   private instruments: Instrument[] = [];
   private transactions: Transaction[] = [];
   private watchlist: WatchlistItem[] = [];
   private quotes = new Map<string, Quote>();
+  private marketCache = new Map<string, MarketCacheEntry>();
+  private dismissed = new Set<string>();
   private settings: Partial<Settings> = {};
   private licenseKey: string | null = null;
   private nextId = 1;
@@ -90,6 +92,22 @@ export class MemoryRepository implements PortfolioRepository {
     for (const quote of quotes) this.quotes.set(quote.symbol, quote);
   }
 
+  async listMarketCache(): Promise<MarketCacheEntry[]> {
+    return [...this.marketCache.values()];
+  }
+
+  async saveMarketCache(entry: MarketCacheEntry): Promise<void> {
+    this.marketCache.set(entry.key, entry);
+  }
+
+  async listDismissedSuggestions(): Promise<string[]> {
+    return [...this.dismissed];
+  }
+
+  async dismissSuggestion(key: string): Promise<void> {
+    this.dismissed.add(key);
+  }
+
   async loadSettings(): Promise<Partial<Settings>> {
     return { ...this.settings };
   }
@@ -111,6 +129,7 @@ export class MemoryRepository implements PortfolioRepository {
     this.transactions = [...data.transactions];
     this.watchlist = [...data.watchlist];
     this.settings = { ...data.settings };
+    this.dismissed = new Set(data.dismissedSuggestions);
     this.quotes.clear();
     const ids = [
       ...data.instruments.map((i) => i.id),

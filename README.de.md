@@ -26,8 +26,11 @@
 ## Funktionen
 
 - **Vermögen auf einen Blick** – Gesamtwert, Ergebnis seit Kauf, heutige Veränderung und Wertverlauf von 1 Monat bis 5 Jahre.
-- **Käufe, Verkäufe und Dividenden** – beliebig viele Buchungen pro Aktie, Gebühren und Steuern getrennt, auch Bruchstücke.
+- **Käufe, Verkäufe, Dividenden und Splits** – beliebig viele Buchungen pro Aktie, Gebühren und Steuern getrennt, auch Bruchstücke.
+- **Dividenden und Splits werden erkannt** – Holdr findet Ausschüttungen und Splits deiner Aktien, die noch nicht gebucht sind; du prüfst sie und übernimmst sie mit einem Klick.
 - **Ehrliche Statistik** – realisierte Gewinne und Verluste (FIFO), Dividenden, Gebühren und Steuern, gesamt, pro Jahr und pro Position.
+- **Wie breit bin ich gestreut?** – dein Depot nach Branche und Land; ETFs werden nach ihren Branchenanteilen aufgeteilt.
+- **Nächste Termine** – nächster Ex-Tag, Zahltag und Quartalszahlen für jede Position.
 - **Merkliste** – Aktien beobachten, die du noch nicht besitzt, mit Entwicklung seit der Aufnahme.
 - **Aktien und ETFs weltweit** – Suche nach Name, Kürzel oder ISIN, z. B. XETRA, Wiener Börse, NASDAQ oder NYSE.
 - **Euro oder US-Dollar** – andere Währungen werden automatisch umgerechnet.
@@ -83,9 +86,11 @@ Holdr ist so gebaut, dass deine Finanzdaten bei dir bleiben.
 
 - Positionen, Buchungen, Merkliste und Einstellungen liegen **nur auf deinem Rechner** in einer
   SQLite-Datei. Es gibt kein Konto, keinen Server und keine Telemetrie.
-- Für Kurse fragt Holdr Daten bei **Yahoo Finance** ab. Übertragen werden nur deine Suchbegriffe und die
-  Börsenkürzel deiner Positionen, Merkliste und der nötigen Wechselkurse – nie Stückzahlen, Kaufkurse
-  oder Beträge. Wie bei jedem Abruf im Internet sieht Yahoo dabei deine IP-Adresse.
+- Für Kurse, Dividenden, Splits, Branchen und Termine fragt Holdr Daten bei **Yahoo Finance** ab.
+  Übertragen werden nur deine Suchbegriffe und die Börsenkürzel deiner Positionen, Merkliste und der
+  nötigen Wechselkurse – nie Stückzahlen, Kaufkurse oder Beträge. Wie bei jedem Abruf im Internet sieht
+  Yahoo dabei deine IP-Adresse. Für Branchen und Termine verlangt Yahoo ein Sitzungs-Cookie; Holdr hält
+  es nur im Arbeitsspeicher und verwirft es beim Beenden.
 - Unter Windows nutzt Holdr die WebView2-Laufzeit von Microsoft zur Darstellung; ob diese Diagnosedaten
   an Microsoft sendet, hängt von deinen Windows-Einstellungen ab.
 

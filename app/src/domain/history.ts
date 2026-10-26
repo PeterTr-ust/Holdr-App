@@ -1,7 +1,7 @@
 /**
  * Builds the portfolio value over time from per-instrument price histories.
  */
-import { quantityAt, type PositionSummary } from "./portfolio";
+import { quantityAt, splitFactorAfter, type PositionSummary } from "./portfolio";
 import type { SeriesPoint } from "./types";
 import type { Converter } from "./valuation";
 
@@ -10,7 +10,8 @@ import type { Converter } from "./valuation";
  *
  * Exchanges trade on different days, so a missing price is carried forward
  * from the instrument's previous close. Dates before the first transaction
- * are omitted.
+ * are omitted. Histories are split-adjusted, so share counts before a
+ * recorded split are adjusted the same way.
  */
 export function buildValueSeries(
   positions: readonly PositionSummary[],
@@ -46,7 +47,8 @@ export function buildValueSeries(
       const price = cursor.series[cursor.index]?.value;
       if (price === undefined) continue;
 
-      const quantity = quantityAt(cursor.position.transactions, date);
+      const { transactions } = cursor.position;
+      const quantity = quantityAt(transactions, date) * splitFactorAfter(transactions, date);
       if (quantity > 0) {
         value += convert(quantity * price, cursor.position.instrument.currency) ?? 0;
       }

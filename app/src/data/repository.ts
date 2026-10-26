@@ -14,6 +14,14 @@ import type {
   WatchlistItem,
 } from "../domain/types";
 
+/** Data from the market data provider that is kept for a while, e.g. company profiles. */
+export interface MarketCacheEntry {
+  key: string;
+  value: unknown;
+  /** ISO timestamp. */
+  fetchedAt: string;
+}
+
 export interface PortfolioRepository {
   listInstruments(): Promise<Instrument[]>;
   /** Creates the instrument, or returns the existing one with the same symbol. */
@@ -35,6 +43,13 @@ export interface PortfolioRepository {
   listCachedQuotes(): Promise<Quote[]>;
   saveQuotes(quotes: readonly Quote[]): Promise<void>;
 
+  listMarketCache(): Promise<MarketCacheEntry[]>;
+  saveMarketCache(entry: MarketCacheEntry): Promise<void>;
+
+  /** Keys of dividend and split suggestions the user dismissed. */
+  listDismissedSuggestions(): Promise<string[]>;
+  dismissSuggestion(key: string): Promise<void>;
+
   loadSettings(): Promise<Partial<Settings>>;
   saveSettings(settings: Settings): Promise<void>;
 
@@ -43,8 +58,9 @@ export interface PortfolioRepository {
   saveLicenseKey(key: string | null): Promise<void>;
 
   /**
-   * Replaces all instruments, transactions, watchlist entries and settings with the given data,
-   * keeping their ids. Cached quotes are cleared.
+   * Replaces all instruments, transactions, watchlist entries, dismissed suggestions and
+   * settings with the given data, keeping their ids. Cached quotes are cleared; the market
+   * cache is kept, as it only depends on symbols.
    */
   replaceAll(data: BackupData): Promise<void>;
 }

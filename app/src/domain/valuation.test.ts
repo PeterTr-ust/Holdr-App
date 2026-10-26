@@ -168,3 +168,37 @@ describe("buildValueSeries", () => {
     ]);
   });
 });
+
+describe("buildValueSeries with splits", () => {
+  it("adjusts share counts before a split to the split-adjusted prices", () => {
+    const txs: Transaction[] = [
+      { ...transactions[0]!, id: 50, date: "2023-01-02", quantity: 10, price: 400 } as Transaction,
+      {
+        id: 51,
+        instrumentId: 1,
+        type: "SPLIT",
+        date: "2023-01-04",
+        ratioTo: 4,
+        ratioFrom: 1,
+        fee: 0,
+        tax: 0,
+        note: null,
+        createdAt: "",
+      },
+    ];
+    const histories = new Map([
+      [
+        "SAP.DE",
+        [
+          { date: "2023-01-02", value: 100 },
+          { date: "2023-01-04", value: 101 },
+        ],
+      ],
+    ]);
+    const series = buildValueSeries([computePosition(sap, txs)], histories, toEur);
+    expect(series).toEqual([
+      { date: "2023-01-02", value: 4000 },
+      { date: "2023-01-04", value: 4040 },
+    ]);
+  });
+});

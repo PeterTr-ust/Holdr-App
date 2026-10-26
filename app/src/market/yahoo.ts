@@ -1,13 +1,25 @@
 /**
- * Market data from Yahoo Finance's public chart and search endpoints.
+ * Market data from Yahoo Finance's public chart, search and quote summary
+ * endpoints.
  *
  * These endpoints need no API key but are not an official, documented API.
+ * The quote summary (profiles, upcoming dates) additionally needs a session
+ * cookie, which the desktop shell handles (`src-tauri/src/yahoo.rs`); without
+ * it, those capabilities are left out.
  *
  * ⚠️ Yahoo's terms do not permit commercial use. As long as this provider is
  * used, Holdr may only be offered free of charge.
  * All parsing is isolated in pure functions so a format change is easy to
  * spot in tests and to fix in one place.
  */
+import type { CorporateActions } from "../domain/corporateActions";
+import {
+  countryCodeFromName,
+  sectorFromLabel,
+  type InstrumentProfile,
+  type Sector,
+  type UpcomingEvents,
+} from "../domain/profile";
 import type { CurrencyCode, InstrumentSearchResult, SeriesPoint } from "../domain/types";
 import {
   MarketDataError,
@@ -43,10 +55,35 @@ const REQUEST_HEADERS = {
   "User-Agent": "Mozilla/5.0 (compatible; Holdr)",
 };
 
+/** Modules requested from the quote summary endpoint per capability. */
+const PROFILE_MODULES = ["assetProfile", "topHoldings"];
+const EVENT_MODULES = ["calendarEvents"];
+
 export type FetchFn = (url: string, init?: RequestInit) => Promise<Response>;
+/** Loads the quote summary JSON for a symbol; needs Yahoo's session cookie. */
+export type QuoteSummaryFn = (symbol: string, modules: readonly string[]) => Promise<unknown>;
 
 export class YahooFinanceProvider implements MarketDataProvider {
-  constructor(private readonly fetchFn: FetchFn) {}
+  readonly getProfile?: (symbol: string) => Promise<InstrumentProfile>;
+  readonly getUpcomingEvents?: (symbol: string) => Promise<UpcomingEvents>;
+
+  constructor(
+    private readonly fetchFn: FetchFn,
+    quoteSummary?: QuoteSummaryFn,
+  ) {
+    if (quoteSummary) {
+      const load = async (symbol: string, modules: readonly string[]) => {
+        try {
+          return await quoteSummary(symbol, modules);
+        } catch (error) {
+          throw new MarketDataError("Quote summary could not be loaded.", { cause: error });
+        }
+      };
+      this.getProfile = async (symbol) => parseProfile(await load(symbol, PROFILE_MODULES));
+      this.getUpcomingEvents = async (symbol) =>
+        parseUpcomingEvents(await load(symbol, EVENT_MODULES), new Date());
+    }
+  }
 
   async search(query: string): Promise<InstrumentSearchResult[]> {
     const params = new URLSearchParams({ q: query, quotesCount: "10", newsCount: "0" });
@@ -67,6 +104,17 @@ export class YahooFinanceProvider implements MarketDataProvider {
     if (from === to) return 1;
     const quote = await this.getQuote(`${from}${to}=X`);
     return quote.price;
+  }
+
+  async getCorporateActions(symbol: string, since: string): Promise<CorporateActions> {
+    const params = new URLSearchParams({
+      period1: String(Math.floor(Date.parse(`${since}T00:00:00Z`) / 1000)),
+      period2: String(Math.floor(Date.now() / 1000)),
+      interval: "1d",
+      events: "div,split",
+    });
+    const url = `${CHART_URL}${encodeURIComponent(symbol)}?${params}`;
+    return parseCorporateActions(await this.getJson(url));
   }
 
   private async getJson(url: string): Promise<unknown> {
@@ -107,6 +155,10 @@ interface ChartResult {
   };
   timestamp?: number[];
   indicators?: { quote?: { close?: (number | null)[] }[] };
+  events?: {
+    dividends?: Record<string, { amount?: number; date?: number }>;
+    splits?: Record<string, { date?: number; numerator?: number; denominator?: number }>;
+  };
 }
 
 function chartResult(json: unknown): ChartResult {
@@ -157,13 +209,114 @@ export function parseHistory(json: unknown): SeriesPoint[] {
   timestamps.forEach((timestamp, index) => {
     const close = closes[index];
     if (typeof close !== "number") return;
-    const date = new Date((timestamp + offset) * 1000).toISOString().slice(0, 10);
-    byDate.set(date, close * factor);
+    byDate.set(exchangeDate(timestamp, offset), close * factor);
   });
 
   return [...byDate.entries()]
     .sort(([a], [b]) => a.localeCompare(b))
     .map(([date, value]) => ({ date, value }));
+}
+
+export function parseCorporateActions(json: unknown): CorporateActions {
+  const result = chartResult(json);
+  const { factor } = normalizeCurrency(result.meta.currency);
+  const offset = result.meta.gmtoffset ?? 0;
+
+  const dividends = Object.values(result.events?.dividends ?? {})
+    .filter((d) => typeof d.date === "number" && typeof d.amount === "number" && d.amount > 0)
+    .map((d) => ({ date: exchangeDate(d.date!, offset), amount: d.amount! * factor }));
+  const splits = Object.values(result.events?.splits ?? {})
+    .filter((s) => typeof s.date === "number" && s.numerator! > 0 && s.denominator! > 0)
+    .map((s) => ({
+      date: exchangeDate(s.date!, offset),
+      ratioTo: s.numerator!,
+      ratioFrom: s.denominator!,
+    }));
+
+  const byDate = (a: { date: string }, b: { date: string }) => a.date.localeCompare(b.date);
+  return { dividends: dividends.sort(byDate), splits: splits.sort(byDate) };
+}
+
+/** Converts a Unix timestamp into the trading date at the exchange. */
+function exchangeDate(timestamp: number, gmtOffset: number): string {
+  return new Date((timestamp + gmtOffset) * 1000).toISOString().slice(0, 10);
+}
+
+// --- Quote summary ---------------------------------------------------------
+
+/** Quote summary values come either plain or as `{ raw, fmt }`. */
+type Value<T> = T | { raw?: T } | undefined;
+
+interface SummaryResult {
+  assetProfile?: { sector?: string; industry?: string; country?: string };
+  topHoldings?: { sectorWeightings?: Record<string, Value<number>>[] };
+  calendarEvents?: {
+    exDividendDate?: Value<number>;
+    dividendDate?: Value<number>;
+    earnings?: { earningsDate?: Value<number>[]; isEarningsDateEstimate?: Value<boolean> };
+  };
+}
+
+function summaryResult(json: unknown): SummaryResult {
+  const summary = (json as { quoteSummary?: { result?: SummaryResult[] | null } })?.quoteSummary;
+  const result = summary?.result?.[0];
+  if (!result) throw new MarketDataError("No quote summary available.");
+  return result;
+}
+
+function raw<T>(value: Value<T>): T | undefined {
+  return typeof value === "object" && value !== null ? (value as { raw?: T }).raw : value;
+}
+
+export function parseProfile(json: unknown): InstrumentProfile {
+  const result = summaryResult(json);
+  const asset = result.assetProfile;
+
+  const weights: Partial<Record<Sector, number>> = {};
+  for (const entry of result.topHoldings?.sectorWeightings ?? []) {
+    for (const [label, value] of Object.entries(entry)) {
+      const sector = sectorFromLabel(label);
+      const weight = raw(value);
+      if (sector && typeof weight === "number" && weight > 0) {
+        weights[sector] = (weights[sector] ?? 0) + weight;
+      }
+    }
+  }
+
+  return {
+    sector: sectorFromLabel(asset?.sector),
+    industry: asset?.industry?.trim() || null,
+    country: countryCodeFromName(asset?.country),
+    sectorWeights: Object.keys(weights).length > 0 ? weights : null,
+  };
+}
+
+/** Keeps only dates from today on; Yahoo often still reports the last past date. */
+export function parseUpcomingEvents(json: unknown, now: Date): UpcomingEvents {
+  const calendar = summaryResult(json).calendarEvents;
+  const today = now.toISOString().slice(0, 10);
+  const upcoming = (value: Value<number>) => {
+    const seconds = raw(value);
+    if (typeof seconds !== "number") return null;
+    const date = new Date(seconds * 1000).toISOString().slice(0, 10);
+    return date >= today ? date : null;
+  };
+
+  const earnings = (calendar?.earnings?.earningsDate ?? [])
+    .map(upcoming)
+    .filter((date): date is string => date !== null)
+    .sort();
+  // Two dates mean the company has only announced a time window.
+  const estimated =
+    raw(calendar?.earnings?.isEarningsDateEstimate) === true ||
+    (calendar?.earnings?.earningsDate?.length ?? 0) > 1;
+
+  return {
+    exDividendDate: upcoming(calendar?.exDividendDate),
+    dividendPaymentDate: upcoming(calendar?.dividendDate),
+    earningsDate: earnings[0] ?? null,
+    earningsDateEstimated: earnings.length > 0 && estimated,
+  };
 }
 
 interface SearchQuote {

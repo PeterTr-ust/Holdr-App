@@ -29,7 +29,7 @@ export interface Instrument {
 
 export type NewInstrument = Omit<Instrument, "id" | "createdAt">;
 
-export type TransactionType = "BUY" | "SELL" | "DIVIDEND";
+export type TransactionType = "BUY" | "SELL" | "DIVIDEND" | "SPLIT";
 
 interface TransactionBase {
   id: number;
@@ -61,11 +61,23 @@ export interface DividendTransaction extends TransactionBase {
   amount: number;
 }
 
-export type Transaction = TradeTransaction | DividendTransaction;
+/**
+ * A stock split (or reverse split): `ratioFrom` old shares become `ratioTo`
+ * new shares, e.g. 4 and 1 for a 4-for-1 split. Fees and taxes are always 0.
+ */
+export interface SplitTransaction extends TransactionBase {
+  type: "SPLIT";
+  ratioTo: number;
+  ratioFrom: number;
+}
+
+export type Transaction = TradeTransaction | DividendTransaction | SplitTransaction;
 
 /** Input shape for creating a transaction (ids and timestamps are assigned by storage). */
 export type NewTransaction =
-  Omit<TradeTransaction, "id" | "createdAt"> | Omit<DividendTransaction, "id" | "createdAt">;
+  | Omit<TradeTransaction, "id" | "createdAt">
+  | Omit<DividendTransaction, "id" | "createdAt">
+  | Omit<SplitTransaction, "id" | "createdAt">;
 
 /** An instrument the user wants to keep an eye on without owning it. */
 export interface WatchlistItem {

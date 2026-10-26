@@ -101,6 +101,23 @@ export function Shell() {
           {t("banner.unpriced", { count: app.valuation.totals.unpricedCount })}
         </div>
       )}
+      {app.suggestions.length > 0 && view.name !== "position" && (
+        <div className="banner banner-actions">
+          {t("banner.suggestions")}
+          {[...new Map(app.suggestions.map((s) => [s.instrument.id, s.instrument])).values()].map(
+            (instrument) => (
+              <button
+                key={instrument.id}
+                type="button"
+                className="link-btn"
+                onClick={() => openPosition(instrument.id)}
+              >
+                {instrument.name}
+              </button>
+            ),
+          )}
+        </div>
+      )}
       {app.integrityIssues.map((instrument) => (
         <div key={instrument.id} className="banner">
           {t("banner.integrity", { name: instrument.name })}

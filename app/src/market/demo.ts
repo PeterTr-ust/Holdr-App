@@ -4,7 +4,10 @@
  * Used only when the UI runs in a plain browser (`npm run dev`) instead of
  * inside the desktop shell, where real requests are blocked by CORS.
  */
+import { addDays, type CorporateActions, type DividendEvent } from "../domain/corporateActions";
+import type { InstrumentProfile, UpcomingEvents } from "../domain/profile";
 import type { CurrencyCode, InstrumentSearchResult, SeriesPoint } from "../domain/types";
+import { todayIso } from "../util/input";
 import {
   MarketDataError,
   type HistoryRange,
@@ -15,7 +18,19 @@ import {
 interface DemoInstrument extends InstrumentSearchResult {
   currency: CurrencyCode;
   basePrice: number;
+  profile: InstrumentProfile;
+  /** Ex-dividend dates as month and day ("MM-DD") with the amount per share. */
+  dividends: { day: string; amount: number }[];
+  /** Days from ex-date to payment. */
+  paymentDelay: number;
 }
+
+const company = (sector: InstrumentProfile["sector"], industry: string, country: string) => ({
+  sector,
+  industry,
+  country,
+  sectorWeights: null,
+});
 
 const INSTRUMENTS: DemoInstrument[] = [
   {
@@ -25,6 +40,27 @@ const INSTRUMENTS: DemoInstrument[] = [
     kind: "ETF",
     currency: "EUR",
     basePrice: 104.62,
+    profile: {
+      sector: null,
+      industry: null,
+      country: null,
+      sectorWeights: {
+        technology: 0.25,
+        financialServices: 0.15,
+        healthcare: 0.11,
+        industrials: 0.11,
+        consumerCyclical: 0.1,
+        communicationServices: 0.08,
+        consumerDefensive: 0.06,
+        energy: 0.04,
+        basicMaterials: 0.04,
+        utilities: 0.03,
+        realEstate: 0.02,
+      },
+    },
+    // Accumulating fund: no payouts.
+    dividends: [],
+    paymentDelay: 0,
   },
   {
     symbol: "SAP.DE",
@@ -33,6 +69,9 @@ const INSTRUMENTS: DemoInstrument[] = [
     kind: "EQUITY",
     currency: "EUR",
     basePrice: 241.1,
+    profile: company("technology", "Software—Application", "DE"),
+    dividends: [{ day: "05-14", amount: 2.35 }],
+    paymentDelay: 2,
   },
   {
     symbol: "SIE.DE",
@@ -41,6 +80,9 @@ const INSTRUMENTS: DemoInstrument[] = [
     kind: "EQUITY",
     currency: "EUR",
     basePrice: 172.3,
+    profile: company("industrials", "Specialty Industrial Machinery", "DE"),
+    dividends: [{ day: "02-14", amount: 5.2 }],
+    paymentDelay: 2,
   },
   {
     symbol: "AAPL",
@@ -49,6 +91,9 @@ const INSTRUMENTS: DemoInstrument[] = [
     kind: "EQUITY",
     currency: "USD",
     basePrice: 229.8,
+    profile: company("technology", "Consumer Electronics", "US"),
+    dividends: ["02-10", "05-12", "08-11", "11-10"].map((day) => ({ day, amount: 0.26 })),
+    paymentDelay: 3,
   },
   {
     symbol: "MSFT",
@@ -57,6 +102,9 @@ const INSTRUMENTS: DemoInstrument[] = [
     kind: "EQUITY",
     currency: "USD",
     basePrice: 431.2,
+    profile: company("technology", "Software—Infrastructure", "US"),
+    dividends: ["02-19", "05-15", "08-21", "11-20"].map((day) => ({ day, amount: 0.83 })),
+    paymentDelay: 24,
   },
 ];
 
@@ -110,6 +158,30 @@ export class DemoMarketDataProvider implements MarketDataProvider {
     throw new MarketDataError(`No demo rate for ${from}/${to}.`);
   }
 
+  async getCorporateActions(symbol: string, since: string): Promise<CorporateActions> {
+    const today = todayIso();
+    return {
+      dividends: dividendEvents(find(symbol)).filter((d) => d.date >= since && d.date <= today),
+      splits: [],
+    };
+  }
+
+  async getProfile(symbol: string): Promise<InstrumentProfile> {
+    return find(symbol).profile;
+  }
+
+  async getUpcomingEvents(symbol: string): Promise<UpcomingEvents> {
+    const instrument = find(symbol);
+    const next = dividendEvents(instrument).find((d) => d.date > todayIso());
+
+    return {
+      exDividendDate: next?.date ?? null,
+      dividendPaymentDate: next ? addDays(next.date, instrument.paymentDelay) : null,
+      earningsDate: addDays(todayIso(), 9 + ((symbol.length * 7) % 40)),
+      earningsDateEstimated: instrument.currency === "USD",
+    };
+  }
+
   /** A seeded random walk ending at the instrument's base price today. */
   private series(instrument: DemoInstrument, days: number): SeriesPoint[] {
     let seed = [...instrument.symbol].reduce((acc, ch) => acc + ch.charCodeAt(0), 0);
@@ -128,6 +200,17 @@ export class DemoMarketDataProvider implements MarketDataProvider {
     }
     return points.reverse();
   }
+}
+
+/** Dividend dates of the last five and the next year. */
+function dividendEvents(instrument: DemoInstrument): DividendEvent[] {
+  const year = new Date().getUTCFullYear();
+  const events: DividendEvent[] = [];
+  for (let y = year - 5; y <= year + 1; y++) {
+    for (const { day, amount } of instrument.dividends)
+      events.push({ date: `${y}-${day}`, amount });
+  }
+  return events;
 }
 
 function find(symbol: string): DemoInstrument {

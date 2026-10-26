@@ -17,7 +17,7 @@ import type {
   TransactionType,
   WatchlistItem,
 } from "../domain/types";
-import type { PortfolioRepository } from "./repository";
+import type { MarketCacheEntry, PortfolioRepository } from "./repository";
 
 /** Must match the connection string used for migrations on the Rust side. */
 export const DATABASE_URL = "sqlite:holdr.db";
@@ -44,6 +44,8 @@ interface TransactionRow {
   quantity: number | null;
   price: number | null;
   amount: number | null;
+  split_to: number | null;
+  split_from: number | null;
   fee: number;
   tax: number;
   note: string | null;
@@ -114,8 +116,9 @@ export class SqliteRepository implements PortfolioRepository {
     const columns = toColumns(input);
     const result = await this.db.execute(
       `INSERT INTO transactions
-         (instrument_id, type, trade_date, quantity, price, amount, fee, tax, note, created_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+         (instrument_id, type, trade_date, quantity, price, amount, split_to, split_from, fee, tax,
+          note, created_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
       [
         input.instrumentId,
         input.type,
@@ -134,9 +137,9 @@ export class SqliteRepository implements PortfolioRepository {
   async updateTransaction(transaction: Transaction): Promise<void> {
     await this.db.execute(
       `UPDATE transactions
-       SET type = $1, trade_date = $2, quantity = $3, price = $4, amount = $5, fee = $6,
-           tax = $7, note = $8
-       WHERE id = $9`,
+       SET type = $1, trade_date = $2, quantity = $3, price = $4, amount = $5, split_to = $6,
+           split_from = $7, fee = $8, tax = $9, note = $10
+       WHERE id = $11`,
       [
         transaction.type,
         transaction.date,
@@ -209,6 +212,41 @@ export class SqliteRepository implements PortfolioRepository {
     }
   }
 
+  async listMarketCache(): Promise<MarketCacheEntry[]> {
+    const rows = await this.db.select<{ key: string; value: string; fetched_at: string }[]>(
+      "SELECT * FROM market_cache",
+    );
+    return rows.flatMap((row) => {
+      try {
+        return [
+          { key: row.key, value: JSON.parse(row.value) as unknown, fetchedAt: row.fetched_at },
+        ];
+      } catch {
+        return []; // A corrupt entry is simply fetched again.
+      }
+    });
+  }
+
+  async saveMarketCache(entry: MarketCacheEntry): Promise<void> {
+    await this.db.execute(
+      `INSERT INTO market_cache (key, value, fetched_at) VALUES ($1, $2, $3)
+       ON CONFLICT(key) DO UPDATE SET value = excluded.value, fetched_at = excluded.fetched_at`,
+      [entry.key, JSON.stringify(entry.value), entry.fetchedAt],
+    );
+  }
+
+  async listDismissedSuggestions(): Promise<string[]> {
+    const rows = await this.db.select<{ key: string }[]>("SELECT key FROM dismissed_suggestions");
+    return rows.map((row) => row.key);
+  }
+
+  async dismissSuggestion(key: string): Promise<void> {
+    await this.db.execute(
+      "INSERT INTO dismissed_suggestions (key, dismissed_at) VALUES ($1, $2) ON CONFLICT(key) DO NOTHING",
+      [key, now()],
+    );
+  }
+
   async loadSettings(): Promise<Partial<Settings>> {
     const rows = await this.db.select<{ key: string; value: string }[]>(
       "SELECT key, value FROM settings",
@@ -263,6 +301,7 @@ export class SqliteRepository implements PortfolioRepository {
       instruments: await this.listInstruments(),
       transactions: await this.listTransactions(),
       watchlist: await this.listWatchlist(),
+      dismissedSuggestions: await this.listDismissedSuggestions(),
       settings: { ...(await this.loadSettings()) } as BackupData["settings"],
     };
     try {
@@ -278,6 +317,7 @@ export class SqliteRepository implements PortfolioRepository {
     await this.db.execute("DELETE FROM instruments");
     await this.db.execute("DELETE FROM watchlist");
     await this.db.execute("DELETE FROM quotes");
+    await this.db.execute("DELETE FROM dismissed_suggestions");
     // The license key is not part of a backup and survives a restore.
     await this.db.execute("DELETE FROM settings WHERE key <> $1", [LICENSE_KEY]);
 
@@ -291,8 +331,9 @@ export class SqliteRepository implements PortfolioRepository {
     for (const tx of data.transactions) {
       await this.db.execute(
         `INSERT INTO transactions
-           (id, instrument_id, type, trade_date, quantity, price, amount, fee, tax, note, created_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
+           (id, instrument_id, type, trade_date, quantity, price, amount, split_to, split_from,
+            fee, tax, note, created_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)`,
         [
           tx.id,
           tx.instrumentId,
@@ -313,6 +354,7 @@ export class SqliteRepository implements PortfolioRepository {
         [w.id, w.symbol, w.name, w.currency, w.exchange, w.kind, w.addedAt || now(), w.addedPrice],
       );
     }
+    for (const key of data.dismissedSuggestions) await this.dismissSuggestion(key);
     if (data.settings.language && data.settings.displayCurrency) {
       await this.saveSettings(data.settings);
     }
@@ -357,12 +399,24 @@ function toTransaction(row: TransactionRow): Transaction {
   if (row.type === "DIVIDEND") {
     return { ...base, type: "DIVIDEND", amount: row.amount ?? 0 };
   }
+  if (row.type === "SPLIT") {
+    return { ...base, type: "SPLIT", ratioTo: row.split_to ?? 1, ratioFrom: row.split_from ?? 1 };
+  }
   return { ...base, type: row.type, quantity: row.quantity ?? 0, price: row.price ?? 0 };
 }
 
-/** Maps the type-specific fields to the (quantity, price, amount) columns. */
-function toColumns(tx: NewTransaction): [number | null, number | null, number | null] {
-  return tx.type === "DIVIDEND" ? [null, null, tx.amount] : [tx.quantity, tx.price, null];
+type TypeColumns = [number | null, number | null, number | null, number | null, number | null];
+
+/** Maps the type-specific fields to the (quantity, price, amount, split_to, split_from) columns. */
+function toColumns(tx: NewTransaction): TypeColumns {
+  switch (tx.type) {
+    case "DIVIDEND":
+      return [null, null, tx.amount, null, null];
+    case "SPLIT":
+      return [null, null, null, tx.ratioTo, tx.ratioFrom];
+    default:
+      return [tx.quantity, tx.price, null, null, null];
+  }
 }
 
 function now(): string {
